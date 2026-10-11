@@ -24,6 +24,7 @@ import {
   DEFAULT_PLANS,
   uploadsDir,
   AuthSession,
+  ProofOfPlayLog,
 } from './db.js';
 import { realtimeHub } from './realtime.js';
 import { runMediaIntegrityAudit, MediaIntegrityAuditReport } from './mediaIntegrity.js';
@@ -1410,10 +1411,78 @@ apiRouter.put('/company/players/:id', requireAuth, requireRole('company'), (req:
   }
   if (playlist_id !== undefined) player.playlist_id = playlist_id || null;
   if (req.body.store_id !== undefined) player.store_id = req.body.store_id || null;
+
+  // Sugestão 3: Transições de tela
+  if (req.body.transition_effect !== undefined) player.transition_effect = req.body.transition_effect;
+
+  // Sugestão 4: Volume Master do Player
+  if (req.body.master_volume !== undefined) {
+    player.master_volume = Math.max(0, Math.min(100, Number(req.body.master_volume)));
+  }
+  if (req.body.master_muted !== undefined) {
+    player.master_muted = Boolean(req.body.master_muted);
+  }
+
+  // Sugestão 5: Modo Economia e Descanso Noturno
+  if (req.body.eco_mode_enabled !== undefined) {
+    player.eco_mode_enabled = Boolean(req.body.eco_mode_enabled);
+  }
+  if (req.body.eco_sleep_start !== undefined) {
+    player.eco_sleep_start = String(req.body.eco_sleep_start).trim();
+  }
+  if (req.body.eco_sleep_end !== undefined) {
+    player.eco_sleep_end = String(req.body.eco_sleep_end).trim();
+  }
+  if (req.body.eco_screen_type !== undefined) {
+    player.eco_screen_type = req.body.eco_screen_type;
+  }
+  if (req.body.is_sleeping !== undefined) {
+    player.is_sleeping = Boolean(req.body.is_sleeping);
+  }
+
   player.updated_at = new Date().toISOString();
 
   db.persist();
+
+  // Notify connected player immediately
+  try {
+    realtimeHub.sendRestartCommand({
+      playerId: player.id,
+      companyId,
+      reason: 'Configurações de exibição do player atualizadas',
+    });
+  } catch {}
+
   res.json(player);
+});
+
+// Sugestão 5: Colocar player em modo descanso ou acordar remotamente
+apiRouter.post('/company/players/:id/toggle-sleep', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
+  const companyId = req.user!.company_id!;
+  const { id } = req.params;
+  const data = db.getData();
+  const player = data.players.find((p) => p.id === id && p.company_id === companyId);
+  if (!player) {
+    return res.status(404).json({ error: 'Player não encontrado.' });
+  }
+
+  player.is_sleeping = !player.is_sleeping;
+  player.updated_at = new Date().toISOString();
+  db.persist();
+
+  try {
+    realtimeHub.sendRestartCommand({
+      playerId: player.id,
+      companyId,
+      reason: player.is_sleeping ? 'Player colocado em modo de descanso (Economia)' : 'Player acordado pelo painel',
+    });
+  } catch {}
+
+  res.json({
+    status: 'ok',
+    is_sleeping: player.is_sleeping,
+    message: player.is_sleeping ? 'Player colocado em repouso com sucesso.' : 'Player ativado e acordado.',
+  });
 });
 
 apiRouter.post('/company/players/:id/toggle-status', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
@@ -1774,6 +1843,16 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company'), (req: 
       name: media?.name || it.name,
       type: media?.type || it.type,
       file_url: media?.file_url || it.file_url,
+      // Sugestão 1: Agendamento Inteligente
+      schedule_enabled: Boolean(it.schedule_enabled),
+      schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
+      schedule_start_time: it.schedule_start_time || undefined,
+      schedule_end_time: it.schedule_end_time || undefined,
+      schedule_start_date: it.schedule_start_date || undefined,
+      schedule_end_date: it.schedule_end_date || undefined,
+      // Sugestão 4: Volume e Mudo por Mídia
+      volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
+      is_muted: Boolean(it.is_muted),
       created_at: now,
     };
   });
@@ -1786,6 +1865,14 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company'), (req: 
     description: description || '',
     weather_city: weather_city?.trim() || 'São Paulo',
     active: true,
+    // Sugestão 3: Transições
+    transition_effect: req.body.transition_effect || 'crossfade',
+    transition_duration: Number(req.body.transition_duration) || 0.8,
+    // Sugestão 2: Letreiro Digital Ticker
+    custom_ticker_enabled: Boolean(req.body.custom_ticker_enabled),
+    custom_ticker_text: req.body.custom_ticker_text || '',
+    custom_ticker_bg_color: req.body.custom_ticker_bg_color || '#0f172a',
+    custom_ticker_speed: Number(req.body.custom_ticker_speed) || 2,
     items: formattedItems,
     created_at: now,
     updated_at: now,
@@ -1825,6 +1912,16 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company'), (re
   if (active !== undefined) playlist.active = active;
   if (req.body.store_id !== undefined) playlist.store_id = req.body.store_id || null;
 
+  // Sugestão 3: Efeito de transição da playlist
+  if (req.body.transition_effect !== undefined) playlist.transition_effect = req.body.transition_effect;
+  if (req.body.transition_duration !== undefined) playlist.transition_duration = Number(req.body.transition_duration) || 0.8;
+
+  // Sugestão 2: Letreiro Digital / Ticker customizado
+  if (req.body.custom_ticker_enabled !== undefined) playlist.custom_ticker_enabled = Boolean(req.body.custom_ticker_enabled);
+  if (req.body.custom_ticker_text !== undefined) playlist.custom_ticker_text = String(req.body.custom_ticker_text);
+  if (req.body.custom_ticker_bg_color !== undefined) playlist.custom_ticker_bg_color = String(req.body.custom_ticker_bg_color);
+  if (req.body.custom_ticker_speed !== undefined) playlist.custom_ticker_speed = Number(req.body.custom_ticker_speed) || 2;
+
   if (items && Array.isArray(items)) {
     const now = new Date().toISOString();
     playlist.items = items.map((it: any, index: number) => {
@@ -1838,6 +1935,16 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company'), (re
         name: media?.name || it.name,
         type: media?.type || it.type,
         file_url: media?.file_url || it.file_url,
+        // Sugestão 1: Agendamento Inteligente
+        schedule_enabled: Boolean(it.schedule_enabled),
+        schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
+        schedule_start_time: it.schedule_start_time || undefined,
+        schedule_end_time: it.schedule_end_time || undefined,
+        schedule_start_date: it.schedule_start_date || undefined,
+        schedule_end_date: it.schedule_end_date || undefined,
+        // Sugestão 4: Volume e Mudo por Mídia
+        volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
+        is_muted: Boolean(it.is_muted),
         created_at: it.created_at || now,
       };
     });
@@ -3242,6 +3349,16 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
             name: m.name,
             type: m.type,
             file_url: m.file_url,
+            // Sugestão 1: Agendamento Inteligente
+            schedule_enabled: Boolean(it.schedule_enabled),
+            schedule_days: it.schedule_days,
+            schedule_start_time: it.schedule_start_time,
+            schedule_end_time: it.schedule_end_time,
+            schedule_start_date: it.schedule_start_date,
+            schedule_end_date: it.schedule_end_date,
+            // Sugestão 4: Volume & Áudio
+            volume: it.volume !== undefined ? it.volume : 100,
+            is_muted: Boolean(it.is_muted),
           };
         })
         .filter(Boolean) as any[];
@@ -3259,6 +3376,17 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
       access_token: player.access_token,
       location: player.location,
       orientation: player.orientation || 'horizontal',
+      // Sugestão 3: Transição padrão do player
+      transition_effect: player.transition_effect || playlist?.transition_effect || 'crossfade',
+      // Sugestão 4: Volume Master e Mudo
+      master_volume: player.master_volume !== undefined ? player.master_volume : 100,
+      master_muted: Boolean(player.master_muted),
+      // Sugestão 5: Modo Economia e Descanso Noturno
+      eco_mode_enabled: Boolean(player.eco_mode_enabled),
+      eco_sleep_start: player.eco_sleep_start || '22:00',
+      eco_sleep_end: player.eco_sleep_end || '06:00',
+      eco_screen_type: player.eco_screen_type || 'black',
+      is_sleeping: Boolean(player.is_sleeping),
     },
     company: {
       id: company.id,
@@ -3269,12 +3397,168 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
           id: playlist.id,
           name: playlist.name,
           weather_city: playlist.weather_city || company.city || 'São Paulo',
+          // Sugestão 3: Transições
+          transition_effect: playlist.transition_effect || 'crossfade',
+          transition_duration: playlist.transition_duration || 0.8,
+          // Sugestão 2: Letreiro Digital
+          custom_ticker_enabled: Boolean(playlist.custom_ticker_enabled),
+          custom_ticker_text: playlist.custom_ticker_text || '',
+          custom_ticker_bg_color: playlist.custom_ticker_bg_color || '#0f172a',
+          custom_ticker_speed: playlist.custom_ticker_speed || 2,
         }
       : null,
     weatherCity: playlist?.weather_city || company.city || 'São Paulo',
     items: itemsWithMedia,
     rssFeeds,
   });
+});
+
+// ========================================================
+// SUGESTÃO 6: PROVA DE EXIBIÇÃO & AUDITORIA (PROOF OF PLAY)
+// ========================================================
+
+// 1. Registro de exibição enviado pelo Player
+apiRouter.post('/player/proof-of-play', (req, res) => {
+  const { player_id, media_id, playlist_id, duration_seconds } = req.body;
+  if (!player_id || !media_id) {
+    return res.status(400).json({ error: 'player_id e media_id são obrigatórios.' });
+  }
+
+  const data = db.getData();
+  const player = data.players.find(
+    (p) =>
+      p.id === player_id ||
+      p.code === player_id ||
+      p.access_token === player_id
+  );
+
+  if (!player) {
+    return res.status(404).json({ error: 'Player não encontrado.' });
+  }
+
+  const media = data.media.find((m) => m.id === media_id);
+  const now = new Date().toISOString();
+
+  if (!data.proof_of_play_logs) {
+    data.proof_of_play_logs = [];
+  }
+
+  const newLog: ProofOfPlayLog = {
+    id: `pop-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    company_id: player.company_id,
+    player_id: player.id,
+    player_name: player.name,
+    store_id: player.store_id || null,
+    media_id,
+    media_name: media?.name || 'Mídia',
+    media_type: media?.type || 'image',
+    playlist_id: playlist_id || player.playlist_id || undefined,
+    duration_seconds: Math.max(1, Number(duration_seconds) || 10),
+    played_at: now,
+  };
+
+  data.proof_of_play_logs.push(newLog);
+
+  // Manter limite nos últimos 5000 registros para alta performance
+  if (data.proof_of_play_logs.length > 5000) {
+    data.proof_of_play_logs = data.proof_of_play_logs.slice(-5000);
+  }
+
+  db.persist();
+  res.status(201).json({ status: 'ok', logId: newLog.id });
+});
+
+// 2. Consulta de logs e sumário para o Dashboard da Empresa
+apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
+  const companyId = req.user!.company_id!;
+  const data = db.getData();
+  const allLogs = (data.proof_of_play_logs || []).filter((l) => l.company_id === companyId);
+
+  const { playerId, mediaId, days } = req.query;
+  const daysNum = Math.max(1, Number(days) || 7);
+  const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+
+  let filtered = allLogs.filter((l) => l.played_at >= cutoff);
+  if (playerId) {
+    filtered = filtered.filter((l) => l.player_id === playerId);
+  }
+  if (mediaId) {
+    filtered = filtered.filter((l) => l.media_id === mediaId);
+  }
+
+  // Agrupar por mídia
+  const mediaMap = new Map<string, { media_id: string; media_name: string; media_type?: string; playCount: number; totalSeconds: number }>();
+  for (const log of filtered) {
+    const existing = mediaMap.get(log.media_id);
+    if (existing) {
+      existing.playCount += 1;
+      existing.totalSeconds += log.duration_seconds;
+    } else {
+      mediaMap.set(log.media_id, {
+        media_id: log.media_id,
+        media_name: log.media_name || 'Mídia',
+        media_type: log.media_type,
+        playCount: 1,
+        totalSeconds: log.duration_seconds,
+      });
+    }
+  }
+
+  const topMedia = Array.from(mediaMap.values()).sort((a, b) => b.playCount - a.playCount);
+  const totalPlays = filtered.length;
+  const totalDurationSeconds = filtered.reduce((acc, l) => acc + l.duration_seconds, 0);
+  const uniquePlayers = new Set(filtered.map((l) => l.player_id)).size;
+  const uniqueMedia = new Set(filtered.map((l) => l.media_id)).size;
+
+  res.json({
+    summary: {
+      totalPlays,
+      totalDurationSeconds,
+      uniquePlayers,
+      uniqueMedia,
+      topMedia,
+      recentLogs: filtered.slice(-100).reverse(),
+    },
+    logsCount: filtered.length,
+  });
+});
+
+// 3. Exportação de Relatório de Prova de Exibição em CSV
+apiRouter.get('/company/proof-of-play/export-csv', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
+  const companyId = req.user!.company_id!;
+  const data = db.getData();
+  const allLogs = (data.proof_of_play_logs || []).filter((l) => l.company_id === companyId);
+
+  const { playerId, mediaId, days } = req.query;
+  const daysNum = Math.max(1, Number(days) || 30);
+  const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+
+  let filtered = allLogs.filter((l) => l.played_at >= cutoff);
+  if (playerId) filtered = filtered.filter((l) => l.player_id === playerId);
+  if (mediaId) filtered = filtered.filter((l) => l.media_id === mediaId);
+
+  const rows = [
+    ['Data/Hora (ISO)', 'Data Local', 'Player ID', 'Nome do Player', 'Mídia ID', 'Nome da Mídia', 'Tipo', 'Duração (s)'].join(';')
+  ];
+
+  for (const log of filtered) {
+    const localDate = new Date(log.played_at).toLocaleString('pt-BR');
+    rows.push([
+      `"${log.played_at}"`,
+      `"${localDate}"`,
+      `"${log.player_id}"`,
+      `"${(log.player_name || '').replace(/"/g, '""')}"`,
+      `"${log.media_id}"`,
+      `"${(log.media_name || '').replace(/"/g, '""')}"`,
+      `"${log.media_type || ''}"`,
+      log.duration_seconds,
+    ].join(';'));
+  }
+
+  const csvContent = rows.join('\r\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="prova-de-exibicao-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.send('\uFEFF' + csvContent);
 });
 
 apiRouter.post('/player/heartbeat', (req, res) => {

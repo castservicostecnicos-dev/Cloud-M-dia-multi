@@ -7,6 +7,7 @@ import {
   LogOut,
   RefreshCw,
   Volume2,
+  VolumeX,
   Tv,
   Smartphone,
   Scaling,
@@ -22,6 +23,9 @@ import {
   CloudRain,
   Star,
   Thermometer,
+  Moon,
+  Sparkles,
+  Radio,
 } from 'lucide-react';
 import { api, getStoredToken, API_BASE_URL } from '../lib/api';
 import { playCallChime, playCallAlert, stopCallAlert, unlockAudio } from '../lib/audio';
@@ -45,9 +49,27 @@ interface CurrentPlayerData {
     access_token?: string;
     location: string;
     orientation?: PlayerOrientation;
+    transition_effect?: 'crossfade' | 'slide' | 'zoom' | 'cut';
+    master_volume?: number;
+    master_muted?: boolean;
+    eco_mode_enabled?: boolean;
+    eco_sleep_start?: string;
+    eco_sleep_end?: string;
+    eco_screen_type?: 'black' | 'clock' | 'dimmed';
+    is_sleeping?: boolean;
   };
   company: { id: string; name: string };
-  playlist: { id: string; name: string; weather_city?: string } | null;
+  playlist: {
+    id: string;
+    name: string;
+    weather_city?: string;
+    transition_effect?: 'crossfade' | 'slide' | 'zoom' | 'cut';
+    transition_duration?: number;
+    custom_ticker_enabled?: boolean;
+    custom_ticker_text?: string;
+    custom_ticker_bg_color?: string;
+    custom_ticker_speed?: number;
+  } | null;
   weatherCity?: string;
   items: Array<{
     id: string;
@@ -57,6 +79,14 @@ interface CurrentPlayerData {
     name: string;
     type: 'image' | 'video' | 'rss' | 'weather_clock';
     file_url: string;
+    schedule_enabled?: boolean;
+    schedule_days?: number[];
+    schedule_start_time?: string;
+    schedule_end_time?: string;
+    schedule_start_date?: string;
+    schedule_end_date?: string;
+    volume?: number;
+    is_muted?: boolean;
   }>;
   rssFeeds: Array<{ id: string; name: string; url: string; active: boolean }>;
 }
@@ -691,28 +721,121 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     return () => clearInterval(interval);
   }, [activeCall]);
 
-  // Playlist items loop timer
+  // Sugestão 1: Agendamento Inteligente de Conteúdo (Smart Scheduling)
+  const isItemScheduled = (item: any): boolean => {
+    if (!item) return false;
+    if (!item.schedule_enabled) return true;
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    if (item.schedule_start_date && todayStr < item.schedule_start_date) return false;
+    if (item.schedule_end_date && todayStr > item.schedule_end_date) return false;
+    if (Array.isArray(item.schedule_days) && item.schedule_days.length > 0) {
+      if (!item.schedule_days.includes(now.getDay())) return false;
+    }
+    if (item.schedule_start_time || item.schedule_end_time) {
+      const curMin = now.getHours() * 60 + now.getMinutes();
+      if (item.schedule_start_time) {
+        const [sh, sm] = item.schedule_start_time.split(':').map(Number);
+        if (curMin < sh * 60 + sm) return false;
+      }
+      if (item.schedule_end_time) {
+        const [eh, em] = item.schedule_end_time.split(':').map(Number);
+        if (curMin > eh * 60 + em) return false;
+      }
+    }
+    return true;
+  };
+
+  // Sugestão 5: Modo Economia de Energia & Descanso Noturno
+  const isSleepModeActive = (): boolean => {
+    if (data?.player?.is_sleeping) return true;
+    if (!data?.player?.eco_mode_enabled) return false;
+    const now = new Date();
+    const curMin = now.getHours() * 60 + now.getMinutes();
+    const startStr = data.player.eco_sleep_start || '22:00';
+    const endStr = data.player.eco_sleep_end || '06:00';
+    const [sh, sm] = startStr.split(':').map(Number);
+    const [eh, em] = endStr.split(':').map(Number);
+    const startMin = sh * 60 + sm;
+    const endMin = eh * 60 + em;
+    if (startMin <= endMin) {
+      return curMin >= startMin && curMin < endMin;
+    } else {
+      return curMin >= startMin || curMin < endMin;
+    }
+  };
+
+  // Sugestão 6: Envio de Prova de Exibição (Proof of Play)
+  const sendProofOfPlay = (item: any, durationSec: number) => {
+    if (!data?.player?.id || !item?.media_id) return;
+    api.recordProofOfPlay({
+      player_id: data.player.id,
+      media_id: item.media_id,
+      playlist_id: data.playlist?.id,
+      duration_seconds: durationSec,
+    }).catch(() => {});
+  };
+
+  // Mídias ativas filtradas pelo agendamento inteligente
+  const allItems = data?.items || [];
+  const hasAnyScheduledRule = allItems.some((it) => it.schedule_enabled);
+  const scheduledItems = allItems.filter(isItemScheduled);
+  const effectiveItems = hasAnyScheduledRule ? scheduledItems : allItems;
+  const currentMedia = effectiveItems.length > 0 ? effectiveItems[currentIndex % effectiveItems.length] : null;
+
+  // Sugestão 4: Controle de Volume e Mudo por Vídeo & Master
   useEffect(() => {
-    if (!data?.items || data.items.length === 0 || activeCall) return;
+    if (currentMedia?.type === 'video' && videoRef.current) {
+      const masterVol = data?.player?.master_volume !== undefined ? data.player.master_volume : 100;
+      const masterMuted = Boolean(data?.player?.master_muted);
+      const itemVol = currentMedia.volume !== undefined ? currentMedia.volume : 100;
+      const itemMuted = Boolean(currentMedia.is_muted);
+      const finalVol = Math.max(0, Math.min(1, (masterVol / 100) * (itemVol / 100)));
+      const finalMuted = masterMuted || itemMuted;
+      videoRef.current.volume = finalVol;
+      videoRef.current.muted = finalMuted;
+    }
+  }, [currentIndex, currentMedia, data?.player?.master_volume, data?.player?.master_muted]);
 
-    const currentItem = data.items[currentIndex];
-    const durationSec = currentItem?.duration || 10;
+  // Avançar mídia com registro de prova de exibição
+  const advanceNextMedia = () => {
+    if (effectiveItems.length === 0) return;
+    const item = effectiveItems[currentIndex % effectiveItems.length];
+    if (item) {
+      sendProofOfPlay(item, item.duration || 10);
+    }
+    setCurrentIndex((prev) => (prev + 1) % effectiveItems.length);
+  };
 
-    if (currentItem?.type === 'video') {
+  // Playlist items loop timer (respeita agendamento e modo sleep)
+  useEffect(() => {
+    if (effectiveItems.length === 0 || activeCall || isSleepModeActive()) return;
+
+    const item = effectiveItems[currentIndex % effectiveItems.length];
+    const durationSec = item?.duration || 10;
+
+    if (item?.type === 'video') {
       return;
     }
 
     const timer = setTimeout(() => {
-      setCurrentIndex((prev) => (prev + 1) % data.items.length);
+      advanceNextMedia();
     }, durationSec * 1000);
 
     return () => clearTimeout(timer);
-  }, [data?.items, currentIndex, activeCall]);
+  }, [effectiveItems, currentIndex, activeCall, data?.player?.is_sleeping]);
 
   const handleVideoEnded = () => {
-    if (data?.items && data.items.length > 0) {
-      setCurrentIndex((prev) => (prev + 1) % data.items.length);
-    }
+    advanceNextMedia();
+  };
+
+  // Sugestão 3: Transições Visuais Suaves e Cinematográficas
+  const transitionEffect = data?.player?.transition_effect || data?.playlist?.transition_effect || 'crossfade';
+  const getTransitionClass = () => {
+    if (transitionEffect === 'slide') return 'animate-in slide-in-from-right duration-700 ease-out';
+    if (transitionEffect === 'zoom') return 'animate-in zoom-in-95 duration-1000 ease-out';
+    if (transitionEffect === 'cut') return '';
+    return 'animate-in fade-in duration-700 ease-in-out';
   };
 
   // Fullscreen toggle
@@ -776,9 +899,61 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     );
   }
 
-  const items = data.items || [];
-  const currentMedia = items[currentIndex];
   const isVertical = orientation === 'vertical';
+
+  // Sugestão 5: Exibição do Modo Noturno / Descanso de Tela (Sleep Mode)
+  if (isSleepModeActive()) {
+    const isBlackScreen = data.player.eco_screen_type === 'black';
+    return (
+      <div
+        ref={containerRef}
+        onMouseMove={handleMouseMove}
+        className="relative flex h-screen w-screen items-center justify-center bg-black overflow-hidden select-none"
+      >
+        {isBlackScreen ? (
+          <div className="flex flex-col items-center justify-center text-slate-800">
+            <Moon className="h-6 w-6 mb-2 opacity-30 animate-pulse text-slate-700" />
+            <span className="text-[10px] font-mono tracking-widest uppercase opacity-25 text-slate-600">
+              Modo Economia Ativo • {currentTime}
+            </span>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center text-center p-8 max-w-lg animate-in fade-in duration-700 text-slate-300">
+            <div className="h-20 w-20 rounded-full bg-slate-900/90 border border-slate-800 flex items-center justify-center mb-6 shadow-2xl">
+              <Moon className="h-10 w-10 text-indigo-400 animate-pulse" />
+            </div>
+            <div className="text-5xl sm:text-6xl font-black text-slate-100 tracking-tight font-mono mb-2">
+              {currentTime}
+            </div>
+            <p className="text-sm font-semibold text-slate-400 capitalize">{currentDate}</p>
+            <div className="mt-6 inline-flex items-center gap-2 rounded-full bg-indigo-950/70 border border-indigo-800/70 px-4 py-1.5 text-xs font-semibold text-indigo-300 shadow-lg">
+              <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+              <span>Modo Economia de Energia • Horário de Repouso</span>
+            </div>
+            <p className="mt-3 text-[11px] text-slate-500 font-mono">
+              Programado para retomar a programação às {data.player.eco_sleep_end || '06:00'}
+            </p>
+          </div>
+        )}
+
+        {showControls && (
+          <div className="absolute top-4 right-4 z-50">
+            <button
+              onClick={() => {
+                if (data.player.id) {
+                  api.togglePlayerSleep(data.player.id).then(() => loadPlayerData()).catch(() => {});
+                }
+              }}
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white shadow-xl hover:bg-indigo-500 cursor-pointer"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>Acordar Player</span>
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -804,71 +979,153 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             : 'w-full h-full'
         }`}
       >
-        {/* 1. MÍDIA ATUAL (IMAGEM OU VÍDEO) */}
+        {/* 1. MÍDIA ATUAL (IMAGEM OU VÍDEO COM TRANSIÇÕES E VOLUME) */}
         <div className="relative flex-1 w-full h-full overflow-hidden bg-black flex items-center justify-center">
-          {items.length === 0 ? (
+          {effectiveItems.length === 0 ? (
             <div className="text-center p-8 text-slate-500 max-w-md">
-              <p className="text-xl font-bold text-slate-400">Sem mídias na playlist</p>
+              <p className="text-xl font-bold text-slate-400">Sem mídias ativas nesta janela de horário</p>
+              <p className="text-xs text-slate-600 mt-2">Os itens da playlist estão configurados para outros dias ou faixas de horário.</p>
             </div>
           ) : currentMedia?.type === 'weather_clock' ? (
-            <WeatherClockMedia
-              key={currentMedia.id + currentIndex}
-              weatherData={weatherData}
-              city={data?.playlist?.weather_city || data?.weatherCity || weatherData.city}
-              isVertical={isVertical}
-              companyName={data?.company?.name}
-              playerName={data?.player?.name}
-            />
+            <div className={`w-full h-full ${getTransitionClass()}`}>
+              <WeatherClockMedia
+                key={currentMedia.id + currentIndex}
+                weatherData={weatherData}
+                city={data?.playlist?.weather_city || data?.weatherCity || weatherData.city}
+                isVertical={isVertical}
+                companyName={data?.company?.name}
+                playerName={data?.player?.name}
+              />
+            </div>
           ) : currentMedia?.type === 'rss' ? (
-            <RssNewsMedia
-              key={currentMedia.id + currentIndex}
-              feedUrl={currentMedia.file_url}
-              mediaName={currentMedia.name}
-              duration={currentMedia.duration || 15}
-              isVertical={isVertical}
-              companyName={data?.company?.name}
-              playerName={data?.player?.name}
-              rssFeeds={data?.rssFeeds}
-            />
+            <div className={`w-full h-full ${getTransitionClass()}`}>
+              <RssNewsMedia
+                key={currentMedia.id + currentIndex}
+                feedUrl={currentMedia.file_url}
+                mediaName={currentMedia.name}
+                duration={currentMedia.duration || 15}
+                isVertical={isVertical}
+                companyName={data?.company?.name}
+                playerName={data?.player?.name}
+                rssFeeds={data?.rssFeeds}
+              />
+            </div>
           ) : currentMedia?.type === 'video' ? (
-            <video
-              ref={videoRef}
-              key={currentMedia.id + currentIndex}
-              src={resolveMediaUrl(currentMedia.file_url)}
-              autoPlay
-              muted
-              playsInline
-              onEnded={handleVideoEnded}
-              onError={(e) => {
-                console.warn('Erro ao reproduzir vídeo ou codec offline, avançando para próxima mídia:', e);
-                setTimeout(() => {
-                  if (items.length > 0) {
-                    setCurrentIndex((prev) => (prev + 1) % items.length);
-                  }
-                }, 2000);
-              }}
-              className="h-full w-full object-cover"
-            />
+            <div className={`relative w-full h-full flex items-center justify-center overflow-hidden ${getTransitionClass()}`}>
+              <video
+                ref={videoRef}
+                key={currentMedia.id + currentIndex}
+                src={resolveMediaUrl(currentMedia.file_url)}
+                autoPlay
+                playsInline
+                onEnded={handleVideoEnded}
+                onError={(e) => {
+                  console.warn('Erro ao reproduzir vídeo ou codec offline, avançando para próxima mídia:', e);
+                  setTimeout(() => {
+                    advanceNextMedia();
+                  }, 2000);
+                }}
+                className="h-full w-full object-cover"
+              />
+
+              {/* Sugestão 4: Indicador de Volume e Áudio */}
+              <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 rounded-lg bg-black/60 backdrop-blur-md px-2.5 py-1 text-[11px] font-mono text-slate-300 border border-slate-800 pointer-events-none">
+                {data.player.master_muted || currentMedia.is_muted ? (
+                  <>
+                    <VolumeX className="h-3.5 w-3.5 text-rose-400" />
+                    <span className="text-rose-300 font-semibold">Mudo</span>
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>{Math.round(((data.player.master_volume ?? 100) * (currentMedia.volume ?? 100)) / 100)}%</span>
+                  </>
+                )}
+              </div>
+            </div>
           ) : (
-            <img
-              key={currentMedia?.id + currentIndex}
-              src={resolveMediaUrl(currentMedia?.file_url)}
-              alt={currentMedia?.name}
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                console.warn('Erro ao carregar imagem, avançando:', e);
-                setTimeout(() => {
-                  if (items.length > 0) {
-                    setCurrentIndex((prev) => (prev + 1) % items.length);
-                  }
-                }, 2500);
-              }}
-              className="h-full w-full object-cover animate-in fade-in duration-500"
-            />
+            <div className={`w-full h-full ${getTransitionClass()}`}>
+              <img
+                key={currentMedia?.id + currentIndex}
+                src={resolveMediaUrl(currentMedia?.file_url)}
+                alt={currentMedia?.name}
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  console.warn('Erro ao carregar imagem, avançando:', e);
+                  setTimeout(() => {
+                    advanceNextMedia();
+                  }, 2500);
+                }}
+                className="h-full w-full object-cover"
+              />
+            </div>
           )}
         </div>
 
-        {/* 2. OVERLAY DA CHAMADA EM DESTAQUE TOTAL (SOBREPÕE QUANDO HÁ CHAMADA) */}
+        {/* 2. SUGESTÃO 2: LETREIRO DIGITAL & TICKER DE RODAPÉ (TICKER EM TEMPO REAL) */}
+        {!activeCall && (
+          <div
+            style={{
+              backgroundColor: data?.playlist?.custom_ticker_bg_color || '#090d16',
+            }}
+            className="relative z-30 flex items-stretch h-10 sm:h-12 w-full border-t border-slate-800 shadow-2xl overflow-hidden text-white"
+          >
+            {/* Bloco de Relógio & Clima à esquerda */}
+            <div className="shrink-0 flex items-center gap-2.5 px-3 sm:px-4 bg-slate-900/90 border-r border-slate-800 z-10 text-xs font-semibold font-mono">
+              <Clock className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+              <span className="font-bold text-white tracking-wider">{currentTime}</span>
+              <span className="text-slate-600 hidden sm:inline">|</span>
+              <span className="text-slate-300 text-[11px] hidden sm:inline">{weatherData.temp}°C</span>
+            </div>
+
+            {/* Letreiro em movimento contínuo (Marquee Ticker) */}
+            <div className="flex-1 overflow-hidden relative flex items-center">
+              <div
+                className="whitespace-nowrap flex items-center gap-12 font-medium text-xs sm:text-sm tracking-wide text-slate-200 animate-ticker"
+                style={{
+                  animationDuration:
+                    data?.playlist?.custom_ticker_speed === 1
+                      ? '160s'
+                      : data?.playlist?.custom_ticker_speed === 3
+                      ? '60s'
+                      : '100s',
+                }}
+              >
+                {data?.playlist?.custom_ticker_enabled && data.playlist.custom_ticker_text ? (
+                  <>
+                    <span className="flex items-center gap-2 text-amber-300 font-bold">
+                      <Radio className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
+                      {data.playlist.custom_ticker_text}
+                    </span>
+                    <span className="text-slate-500">•</span>
+                    <span>{data.playlist.custom_ticker_text}</span>
+                    <span className="text-slate-500">•</span>
+                    <span className="text-blue-300">{data.player.name} • {data.company.name}</span>
+                    <span className="text-slate-500">•</span>
+                    <span>{data.playlist.custom_ticker_text}</span>
+                  </>
+                ) : (
+                  (rssHeadlines.length > 0 ? rssHeadlines : DEFAULT_HEADLINES).map((hl, idx) => (
+                    <React.Fragment key={idx}>
+                      <span className="inline-flex items-center gap-2">
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 shrink-0" />
+                        {hl}
+                      </span>
+                      <span className="text-slate-600 font-bold">•</span>
+                    </React.Fragment>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Badge da Empresa / Player à direita */}
+            <div className="shrink-0 hidden md:flex items-center gap-2 px-3 bg-slate-900/90 border-l border-slate-800 z-10 text-[11px] font-bold text-slate-300">
+              <span className="truncate max-w-[140px] text-blue-400">{data?.player?.name}</span>
+            </div>
+          </div>
+        )}
+
+        {/* 3. OVERLAY DA CHAMADA EM DESTAQUE TOTAL (SOBREPÕE QUANDO HÁ CHAMADA) */}
         {activeCall && (
           <div
             className={`absolute inset-0 z-50 flex flex-col items-center justify-between backdrop-blur-md p-6 sm:p-10 text-white animate-in zoom-in-95 duration-300 ${
@@ -1012,7 +1269,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             {cacheSyncStatus === 'syncing'
               ? 'Baixando p/ Cache...'
               : cacheSyncStatus === 'synced'
-              ? `Cache Pronto (${cachedMediaCount || items.length})`
+              ? `Cache Pronto (${cachedMediaCount || allItems.length})`
               : 'Salvar p/ Offline'}
           </span>
         </button>

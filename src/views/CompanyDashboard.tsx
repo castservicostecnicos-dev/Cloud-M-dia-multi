@@ -48,9 +48,17 @@ import {
   MapPin,
   GitBranch,
   Activity,
+  Calendar,
+  Volume2,
+  VolumeX,
+  Moon,
+  BarChart3,
+  Download,
+  Sliders,
+  Palette,
 } from 'lucide-react';
 import { api } from '../lib/api';
-import { CompanyStats, CompanyStore, Player, Operator, Playlist, Media, RssFeed, Company, MediaIntegrityAuditReport, MediaIntegrityItemResult } from '../types';
+import { CompanyStats, CompanyStore, Player, Operator, Playlist, Media, RssFeed, Company, MediaIntegrityAuditReport, MediaIntegrityItemResult, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog, PlaylistItem } from '../types';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { MediaThumbnail } from '../components/MediaThumbnail';
 import { MediaPreviewModal } from '../components/MediaPreviewModal';
@@ -68,7 +76,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   onOpenPlayerSimulation,
   companyInfo,
 }) => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'stores' | 'players' | 'operators' | 'playlists' | 'media' | 'rss'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'stores' | 'players' | 'operators' | 'playlists' | 'media' | 'rss' | 'proof_of_play'>('dashboard');
   const [stats, setStats] = useState<CompanyStats | null>(null);
   const [stores, setStores] = useState<CompanyStore[]>([]);
   const [selectedStoreFilter, setSelectedStoreFilter] = useState<string>('all');
@@ -195,6 +203,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     orientation: 'horizontal' | 'vertical';
     playlist_id: string;
     password: string;
+    transition_effect?: TransitionEffect;
+    master_volume?: number;
+    master_muted?: boolean;
+    eco_mode_enabled?: boolean;
+    eco_sleep_start?: string;
+    eco_sleep_end?: string;
+    eco_screen_type?: 'black' | 'clock';
   }>({
     name: '',
     code: '',
@@ -204,6 +219,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     orientation: 'horizontal',
     playlist_id: '',
     password: '',
+    transition_effect: 'crossfade',
+    master_volume: 100,
+    master_muted: false,
+    eco_mode_enabled: false,
+    eco_sleep_start: '22:00',
+    eco_sleep_end: '06:00',
+    eco_screen_type: 'black',
   });
 
   const [operatorForm, setOperatorForm] = useState({
@@ -219,17 +241,116 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     description: string;
     store_id: string;
     weather_city: string;
+    transition_effect?: TransitionEffect;
+    transition_duration?: number;
+    custom_ticker_enabled?: boolean;
+    custom_ticker_text?: string;
+    custom_ticker_bg_color?: string;
+    custom_ticker_speed?: number;
     items: Array<{
+      id?: string;
       media_id: string;
       duration: number | string;
+      schedule_enabled?: boolean;
+      schedule_days?: number[];
+      schedule_start_time?: string;
+      schedule_end_time?: string;
+      schedule_start_date?: string;
+      schedule_end_date?: string;
+      volume?: number;
+      is_muted?: boolean;
     }>;
   }>({
     name: '',
     description: '',
     store_id: '',
     weather_city: '',
+    transition_effect: 'crossfade',
+    transition_duration: 0.8,
+    custom_ticker_enabled: false,
+    custom_ticker_text: '',
+    custom_ticker_bg_color: '#0f172a',
+    custom_ticker_speed: 2,
     items: [],
   });
+
+  // Modal para configuração de Agendamento Inteligente do item da playlist
+  const [scheduleModalItemIndex, setScheduleModalItemIndex] = useState<number | null>(null);
+
+  // Estados da Prova de Exibição (Proof of Play)
+  const [proofOfPlaySummary, setProofOfPlaySummary] = useState<ProofOfPlaySummary | null>(null);
+  const [proofOfPlayLoading, setProofOfPlayLoading] = useState(false);
+  const [proofOfPlayDays, setProofOfPlayDays] = useState<number>(7);
+  const [proofOfPlayPlayerFilter, setProofOfPlayPlayerFilter] = useState<string>('all');
+
+  const loadProofOfPlay = async () => {
+    try {
+      setProofOfPlayLoading(true);
+      const res = await api.getProofOfPlaySummary({
+        days: proofOfPlayDays,
+        playerId: proofOfPlayPlayerFilter !== 'all' ? proofOfPlayPlayerFilter : undefined,
+      });
+      if (res?.summary) {
+        setProofOfPlaySummary(res.summary);
+      }
+    } catch (err: any) {
+      console.warn('Erro ao carregar prova de exibição:', err);
+    } finally {
+      setProofOfPlayLoading(false);
+    }
+  };
+
+  const handleExportProofOfPlayCsv = () => {
+    const params = new URLSearchParams();
+    params.append('days', String(proofOfPlayDays));
+    if (proofOfPlayPlayerFilter !== 'all') {
+      params.append('playerId', proofOfPlayPlayerFilter);
+    }
+    const token = localStorage.getItem('token') || '';
+    fetch(`/api/company/proof-of-play/export-csv?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Falha ao exportar CSV');
+        return res.blob();
+      })
+      .then((blob) => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `auditoria-prova-de-exibicao-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        showToast('success', 'Relatório CSV de Prova de Exibição gerado e exportado com sucesso!');
+      })
+      .catch((err) => {
+        showToast('error', err.message || 'Erro ao exportar relatório CSV');
+      });
+  };
+
+  const formatSecondsToReadable = (seconds: number) => {
+    if (!seconds || seconds <= 0) return '0s';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    if (hrs > 0) {
+      return `${hrs}h ${mins}m ${secs > 0 ? `${secs}s` : ''}`.trim();
+    }
+    if (mins > 0) {
+      return `${mins}m ${secs > 0 ? `${secs}s` : ''}`.trim();
+    }
+    return `${secs}s`;
+  };
+
+  useEffect(() => {
+    if (activeTab === 'proof_of_play') {
+      loadProofOfPlay();
+    }
+  }, [activeTab, proofOfPlayDays, proofOfPlayPlayerFilter]);
 
   // Media Picker modal states for Playlist
   const [mediaPickerModalOpen, setMediaPickerModalOpen] = useState(false);
@@ -538,6 +659,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         orientation: player.orientation || 'horizontal',
         playlist_id: player.playlist_id || '',
         password: '',
+        transition_effect: player.transition_effect || 'crossfade',
+        master_volume: player.master_volume !== undefined ? player.master_volume : 100,
+        master_muted: Boolean(player.master_muted),
+        eco_mode_enabled: Boolean(player.eco_mode_enabled),
+        eco_sleep_start: player.eco_sleep_start || '22:00',
+        eco_sleep_end: player.eco_sleep_end || '06:00',
+        eco_screen_type: player.eco_screen_type || 'black',
       });
     } else {
       setEditingPlayer(null);
@@ -551,9 +679,26 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         orientation: 'horizontal',
         playlist_id: playlists[0]?.id || '',
         password: '',
+        transition_effect: 'crossfade',
+        master_volume: 100,
+        master_muted: false,
+        eco_mode_enabled: false,
+        eco_sleep_start: '22:00',
+        eco_sleep_end: '06:00',
+        eco_screen_type: 'black',
       });
     }
     setPlayerModalOpen(true);
+  };
+
+  const handleTogglePlayerSleep = async (player: Player) => {
+    try {
+      const res = await api.togglePlayerSleep(player.id);
+      showToast('success', res.message || (res.is_sleeping ? 'Player colocado em repouso (Modo Economia).' : 'Player acordado com sucesso.'));
+      loadData();
+    } catch (err: any) {
+      showToast('error', err.message || 'Erro ao alternar modo repouso do player.');
+    }
   };
 
   const handleSavePlayer = async (e: React.FormEvent) => {
@@ -739,13 +884,28 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         description: playlist.description || '',
         store_id: playlist.store_id || '',
         weather_city: playlist.weather_city || '',
+        transition_effect: playlist.transition_effect || 'crossfade',
+        transition_duration: playlist.transition_duration || 0.8,
+        custom_ticker_enabled: Boolean(playlist.custom_ticker_enabled),
+        custom_ticker_text: playlist.custom_ticker_text || '',
+        custom_ticker_bg_color: playlist.custom_ticker_bg_color || '#0f172a',
+        custom_ticker_speed: playlist.custom_ticker_speed || 2,
         items: playlist.items.map((it) => {
           const matchedMedia = mediaList.find((m) => m.id === it.media_id);
           return {
+            id: it.id,
             media_id: it.media_id,
             duration: it.duration || 10,
             name: matchedMedia?.name || it.name,
             type: matchedMedia?.type || it.type,
+            schedule_enabled: Boolean(it.schedule_enabled),
+            schedule_days: it.schedule_days || [0, 1, 2, 3, 4, 5, 6],
+            schedule_start_time: it.schedule_start_time || '',
+            schedule_end_time: it.schedule_end_time || '',
+            schedule_start_date: it.schedule_start_date || '',
+            schedule_end_date: it.schedule_end_date || '',
+            volume: it.volume !== undefined ? it.volume : 100,
+            is_muted: Boolean(it.is_muted),
           } as any;
         }),
       });
@@ -757,11 +917,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         description: '',
         store_id: selectedStoreFilter !== 'all' ? selectedStoreFilter : '',
         weather_city: selectedStoreObj?.city || '',
+        transition_effect: 'crossfade',
+        transition_duration: 0.8,
+        custom_ticker_enabled: false,
+        custom_ticker_text: '',
+        custom_ticker_bg_color: '#0f172a',
+        custom_ticker_speed: 2,
         items: mediaList.slice(0, 2).map((m) => ({
           media_id: m.id,
           duration: m.duration || 10,
           name: m.name,
           type: m.type,
+          schedule_enabled: false,
+          schedule_days: [0, 1, 2, 3, 4, 5, 6],
+          schedule_start_time: '',
+          schedule_end_time: '',
+          schedule_start_date: '',
+          schedule_end_date: '',
+          volume: 100,
+          is_muted: false,
         } as any)),
       });
     }
@@ -826,9 +1000,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       const payload = {
         ...playlistForm,
         items: playlistForm.items.map((it, idx) => ({
+          ...it,
           media_id: it.media_id,
           position: idx + 1,
           duration: Number(it.duration) || 10,
+          schedule_enabled: Boolean(it.schedule_enabled),
+          schedule_days: it.schedule_days || [0, 1, 2, 3, 4, 5, 6],
+          schedule_start_time: it.schedule_start_time || undefined,
+          schedule_end_time: it.schedule_end_time || undefined,
+          schedule_start_date: it.schedule_start_date || undefined,
+          schedule_end_date: it.schedule_end_date || undefined,
+          volume: it.volume !== undefined ? Number(it.volume) : 100,
+          is_muted: Boolean(it.is_muted),
         })),
         restartPlayers: andRestart,
       };
@@ -1536,6 +1719,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('proof_of_play')}
+            className={`w-full lg:w-auto justify-center min-h-[42px] px-3.5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 text-center ${
+              activeTab === 'proof_of_play'
+                ? 'bg-amber-600 text-white shadow-sm'
+                : 'bg-slate-800/80 text-amber-300 hover:text-white hover:bg-slate-800 border border-amber-800/50'
+            }`}
+          >
+            <BarChart3 className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+            <span>Prova de Exibição</span>
+          </button>
+
+          <button
             type="button"
             onClick={() => handleRestartPlayers({})}
             disabled={isRestartingPlayer === 'all'}
@@ -2078,6 +2273,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       <span>Ver Tela</span>
                     </button>
                     <button
+                      onClick={() => handleTogglePlayerSleep(p)}
+                      className={`min-h-[44px] flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        p.is_sleeping
+                          ? 'bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border-indigo-700/80'
+                          : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                      }`}
+                      title={p.is_sleeping ? 'Acordar player' : 'Colocar player em repouso (Modo Economia)'}
+                    >
+                      <Moon className={`h-3.5 w-3.5 ${p.is_sleeping ? 'text-indigo-400' : 'text-slate-400'}`} />
+                      <span>{p.is_sleeping ? 'Acordar' : 'Repouso'}</span>
+                    </button>
+                    <button
                       onClick={() => handleOpenPlayerModal(p)}
                       className="min-h-[44px] flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-700/60 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-semibold cursor-pointer"
                     >
@@ -2281,6 +2488,19 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             title="Simular visualização"
                           >
                             <Tv className="h-4 w-4" />
+                          </button>
+                          {/* Botão de repouso / eco sleep */}
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePlayerSleep(p)}
+                            className={`p-1.5 rounded-lg transition cursor-pointer ${
+                              p.is_sleeping
+                                ? 'bg-indigo-950 text-indigo-300 hover:bg-indigo-900 border border-indigo-700/60'
+                                : 'text-slate-400 hover:text-white hover:bg-slate-700'
+                            }`}
+                            title={p.is_sleeping ? 'Acordar player agora' : 'Colocar player em repouso (Modo Economia)'}
+                          >
+                            <Moon className={`h-4 w-4 ${p.is_sleeping ? 'text-indigo-400' : 'text-slate-400'}`} />
                           </button>
                           <button
                             onClick={() => handleOpenPlayerModal(p)}
@@ -3402,6 +3622,263 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         </div>
       )}
 
+      {/* SUGESTÃO 6: ABA DE PROVA DE EXIBIÇÃO & AUDITORIA (PROOF OF PLAY) */}
+      {activeTab === 'proof_of_play' && (
+        <div className="space-y-6">
+          {/* Top Bar with Filters and Export */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="h-5 w-5 text-emerald-400" />
+                <span>Prova de Exibição & Auditoria (Proof of Play)</span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Métricas auditáveis e relatórios de conformidade comercial para anunciantes e lojistas.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Filtro de Período */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={proofOfPlayDays}
+                  onChange={(e) => setProofOfPlayDays(Number(e.target.value))}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer"
+                >
+                  <option value={1}>Últimas 24 horas</option>
+                  <option value={7}>Últimos 7 dias</option>
+                  <option value={15}>Últimos 15 dias</option>
+                  <option value={30}>Últimos 30 dias</option>
+                </select>
+              </div>
+
+              {/* Filtro de Player */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Tv className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={proofOfPlayPlayerFilter}
+                  onChange={(e) => setProofOfPlayPlayerFilter(e.target.value)}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
+                >
+                  <option value="all">Todas as Telas</option>
+                  {players.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Atualizar */}
+              <button
+                type="button"
+                onClick={loadProofOfPlay}
+                disabled={proofOfPlayLoading}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer"
+                title="Atualizar dados de exibição"
+              >
+                <RefreshCw className={`h-4 w-4 ${proofOfPlayLoading ? 'animate-spin text-blue-400' : ''}`} />
+              </button>
+
+              {/* Exportar CSV */}
+              <button
+                type="button"
+                onClick={handleExportProofOfPlayCsv}
+                className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-xs cursor-pointer"
+                title="Exportar registros detalhados em planilha CSV para anunciantes"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>Exportar Relatório CSV</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Cards de Métricas Principais (KPIs) */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Total de Exibições</span>
+                <div className="p-2 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  <Play className="h-4 w-4 fill-current" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-white font-mono">
+                {proofOfPlayLoading ? '...' : (proofOfPlaySummary?.totalPlays ?? 0).toLocaleString('pt-BR')}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Impactos veiculados no período</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tempo Total no Ar</span>
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <Clock className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-emerald-400 font-mono">
+                {proofOfPlayLoading ? '...' : formatSecondsToReadable(proofOfPlaySummary?.totalDurationSeconds ?? 0)}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Horas totais de exibição em tela</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Telas Auditadas</span>
+                <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                  <Tv className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-indigo-400 font-mono">
+                {proofOfPlayLoading ? '...' : (proofOfPlaySummary?.uniquePlayers ?? 0)}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Reprodutores que reportaram logs</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Mídias no Período</span>
+                <div className="p-2 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                  <Film className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-purple-400 font-mono">
+                {proofOfPlayLoading ? '...' : (proofOfPlaySummary?.uniqueMedia ?? 0)}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Campanhas distintas transmitidas</p>
+            </div>
+          </div>
+
+          {/* Gráfico / Ranking das Top Mídias & Tabela de Registros Recentes */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Top Mídias Mais Exibidas */}
+            <div className="lg:col-span-1 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-blue-400" />
+                  <span>Mídias Mais Exibidas</span>
+                </h3>
+                <span className="text-[11px] font-semibold text-slate-400">
+                  Top {(proofOfPlaySummary?.topMedia || []).length}
+                </span>
+              </div>
+
+              {(!proofOfPlaySummary?.topMedia || proofOfPlaySummary.topMedia.length === 0) ? (
+                <div className="p-6 text-center text-slate-500 text-xs">
+                  Nenhuma mídia registrada no período selecionado.
+                </div>
+              ) : (
+                <div className="space-y-3.5 max-h-[460px] overflow-y-auto pr-1">
+                  {proofOfPlaySummary.topMedia.slice(0, 10).map((tm, idx) => {
+                    const maxCount = proofOfPlaySummary.topMedia[0]?.playCount || 1;
+                    const percent = Math.min(100, Math.round((tm.playCount / maxCount) * 100));
+                    return (
+                      <div key={tm.media_id || idx} className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
+                            <span className="font-mono text-slate-500 font-bold text-[10px]">#{idx + 1}</span>
+                            <span className="font-semibold text-white truncate text-xs" title={tm.media_name}>
+                              {tm.media_name}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-mono font-bold text-blue-400 text-xs">{tm.playCount}x</span>
+                            <span className="text-slate-500 text-[10px] ml-1">({formatSecondsToReadable(tm.totalSeconds)})</span>
+                          </div>
+                        </div>
+                        <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full"
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Tabela de Logs Recentes de Auditoria */}
+            <div className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-emerald-400" />
+                  <span>Últimos Registros de Reprodução (Tempo Real)</span>
+                </h3>
+                <span className="text-[11px] font-semibold text-slate-400">
+                  {proofOfPlaySummary?.recentLogs?.length || 0} eventos
+                </span>
+              </div>
+
+              {(!proofOfPlaySummary?.recentLogs || proofOfPlaySummary.recentLogs.length === 0) ? (
+                <div className="p-12 text-center space-y-2">
+                  <ShieldAlert className="h-8 w-8 text-slate-600 mx-auto" />
+                  <p className="text-sm font-bold text-slate-300">Nenhum evento registrado ainda</p>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Assim que as TVs reproduzirem a grade, cada exibição com data, horário e duração aparecerá aqui automaticamente.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase">
+                        <th className="pb-2.5 font-bold">Data & Hora</th>
+                        <th className="pb-2.5 font-bold">Mídia</th>
+                        <th className="pb-2.5 font-bold">TV / Player</th>
+                        <th className="pb-2.5 font-bold">Duração</th>
+                        <th className="pb-2.5 font-bold text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {proofOfPlaySummary.recentLogs.slice(0, 50).map((log) => {
+                        const dateFormatted = new Date(log.played_at).toLocaleString('pt-BR');
+                        return (
+                          <tr key={log.id} className="hover:bg-slate-800/40 transition">
+                            <td className="py-2.5 font-mono text-[11px] text-slate-300">
+                              {dateFormatted}
+                            </td>
+                            <td className="py-2.5">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                  log.media_type === 'video'
+                                    ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                    : log.media_type === 'rss'
+                                    ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                                    : 'bg-blue-950 text-blue-300 border border-blue-800'
+                                }`}>
+                                  {log.media_type || 'IMG'}
+                                </span>
+                                <span className="font-semibold text-white truncate max-w-[160px]" title={log.media_name}>
+                                  {log.media_name}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 text-slate-300 font-medium">
+                              {log.player_name || log.player_id}
+                            </td>
+                            <td className="py-2.5 font-mono text-slate-300">
+                              {log.duration_seconds}s
+                            </td>
+                            <td className="py-2.5 text-right">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded-full">
+                                <CheckCircle2 className="h-3 w-3" />
+                                <span>Verificado</span>
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL PLAYER */}
       {playerModalOpen && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 p-0 sm:p-4 backdrop-blur-xs">
@@ -3550,6 +4027,117 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       </option>
                     ))}
                   </select>
+                </div>
+
+                {/* Sugestão 3: Transição de Tela Padrão */}
+                <div>
+                  <label className="block font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-blue-400" />
+                    <span>Transição Visual entre Mídias</span>
+                  </label>
+                  <select
+                    value={playerForm.transition_effect || 'crossfade'}
+                    onChange={(e) => setPlayerForm({ ...playerForm, transition_effect: e.target.value as any })}
+                    className="w-full min-h-[44px] rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="crossfade">Dissolvência Suave (Crossfade)</option>
+                    <option value="slide">Deslizamento Lateral (Slide)</option>
+                    <option value="zoom">Zoom Cinematográfico (Ken Burns)</option>
+                    <option value="cut">Corte Instantâneo Clássico</option>
+                  </select>
+                </div>
+
+                {/* Sugestão 4: Volume Master do Reprodutor */}
+                <div className="rounded-xl border border-slate-700/80 bg-slate-800/60 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="font-semibold text-slate-200 flex items-center gap-1.5 text-xs">
+                      {playerForm.master_muted ? (
+                        <VolumeX className="h-4 w-4 text-rose-400" />
+                      ) : (
+                        <Volume2 className="h-4 w-4 text-emerald-400" />
+                      )}
+                      <span>Volume Master do Player</span>
+                    </label>
+                    <span className="font-mono font-bold text-xs text-white">
+                      {playerForm.master_muted ? 'Mudo' : `${playerForm.master_volume ?? 100}%`}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      disabled={playerForm.master_muted}
+                      value={playerForm.master_volume ?? 100}
+                      onChange={(e) => setPlayerForm({ ...playerForm, master_volume: Number(e.target.value) })}
+                      className="flex-1 accent-blue-500 cursor-pointer disabled:opacity-40"
+                    />
+                    <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={playerForm.master_muted ?? false}
+                        onChange={(e) => setPlayerForm({ ...playerForm, master_muted: e.target.checked })}
+                        className="rounded accent-rose-500"
+                      />
+                      <span>Silencioso (Mudo)</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Sugestão 5: Modo Economia de Energia & Descanso Noturno */}
+                <div className="rounded-xl border border-indigo-800/60 bg-indigo-950/30 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="font-bold text-indigo-300 flex items-center gap-1.5 text-xs cursor-pointer">
+                      <Moon className="h-4 w-4 text-indigo-400" />
+                      <span>Modo Economia de Energia Noturno</span>
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={playerForm.eco_mode_enabled ?? false}
+                      onChange={(e) => setPlayerForm({ ...playerForm, eco_mode_enabled: e.target.checked })}
+                      className="rounded accent-indigo-500 h-4 w-4 cursor-pointer"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Desliga a reprodução fora do expediente para economizar energia e evitar queima da tela (burn-in).
+                  </p>
+
+                  {playerForm.eco_mode_enabled && (
+                    <div className="pt-2 border-t border-indigo-800/40 space-y-2.5 animate-in fade-in">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] uppercase font-bold text-indigo-300 mb-1">Dormir às</label>
+                          <input
+                            type="time"
+                            value={playerForm.eco_sleep_start || '22:00'}
+                            onChange={(e) => setPlayerForm({ ...playerForm, eco_sleep_start: e.target.value })}
+                            className="w-full rounded-lg border border-indigo-700/80 bg-slate-900 px-2.5 py-1.5 text-white text-xs font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase font-bold text-indigo-300 mb-1">Acordar às</label>
+                          <input
+                            type="time"
+                            value={playerForm.eco_sleep_end || '06:00'}
+                            onChange={(e) => setPlayerForm({ ...playerForm, eco_sleep_end: e.target.value })}
+                            className="w-full rounded-lg border border-indigo-700/80 bg-slate-900 px-2.5 py-1.5 text-white text-xs font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] uppercase font-bold text-indigo-300 mb-1">Aparência em Repouso</label>
+                        <select
+                          value={playerForm.eco_screen_type || 'black'}
+                          onChange={(e) => setPlayerForm({ ...playerForm, eco_screen_type: e.target.value as any })}
+                          className="w-full rounded-lg border border-indigo-700/80 bg-slate-900 px-2.5 py-1.5 text-white text-xs"
+                        >
+                          <option value="black">Tela Preta Anti-Burn-In (Consumo Mínimo)</option>
+                          <option value="clock">Relógio OLED Minimalista Escurecido</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {!editingPlayer && (
@@ -3843,6 +4431,112 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   />
                 </div>
 
+                {/* Sugestão 3: Transição Visual da Playlist */}
+                <div className="rounded-xl border border-slate-700/80 bg-slate-800/60 p-3 space-y-2">
+                  <label className="font-semibold text-slate-200 flex items-center gap-1.5 text-xs">
+                    <Sparkles className="h-4 w-4 text-blue-400" />
+                    <span>Efeito de Transição Padrão da Playlist</span>
+                  </label>
+                  <select
+                    value={playlistForm.transition_effect || 'crossfade'}
+                    onChange={(e) => setPlaylistForm({ ...playlistForm, transition_effect: e.target.value as any })}
+                    className="w-full min-h-[40px] rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white text-xs focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="crossfade">Dissolvência Suave (Crossfade)</option>
+                    <option value="slide">Deslizamento Lateral (Slide)</option>
+                    <option value="zoom">Zoom Cinematográfico (Ken Burns)</option>
+                    <option value="cut">Corte Instantâneo (Cut)</option>
+                  </select>
+                  <p className="text-[11px] text-slate-400">
+                    Define como as mídias se alternam visualmente nas TVs vinculadas a esta playlist.
+                  </p>
+                </div>
+
+                {/* Sugestão 2: Letreiro Digital Customizado (Ticker de Rodapé) */}
+                <div className="rounded-xl border border-blue-900/50 bg-blue-950/20 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="font-bold text-blue-300 flex items-center gap-1.5 text-xs cursor-pointer">
+                      <Radio className="h-4 w-4 text-blue-400" />
+                      <span>Letreiro Digital no Rodapé (Ticker de Avisos / Ofertas)</span>
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={playlistForm.custom_ticker_enabled ?? false}
+                      onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_enabled: e.target.checked })}
+                      className="rounded accent-blue-500 h-4 w-4 cursor-pointer"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Exibe uma faixa contínua animada no rodapé da TV com avisos institucionais, novidades e ofertas.
+                  </p>
+
+                  {playlistForm.custom_ticker_enabled && (
+                    <div className="pt-2 border-t border-blue-900/40 space-y-3 animate-in fade-in">
+                      <div>
+                        <label className="block text-[11px] font-bold text-blue-200 mb-1">
+                          Texto do Letreiro Deslizante
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={playlistForm.custom_ticker_text || ''}
+                          onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_text: e.target.value })}
+                          placeholder="Ex: 🎉 Bem-vindo à nossa loja! • Confira as ofertas da semana no balcão • Atendimento das 08h às 20h"
+                          className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-white text-xs focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-blue-200 mb-1">
+                            Cor da Faixa
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="color"
+                              value={playlistForm.custom_ticker_bg_color || '#0f172a'}
+                              onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_bg_color: e.target.value })}
+                              className="h-8 w-10 rounded cursor-pointer border border-slate-700 bg-transparent"
+                            />
+                            <div className="flex items-center gap-1">
+                              {[
+                                { color: '#0f172a', name: 'Escuro' },
+                                { color: '#1e3a8a', name: 'Azul' },
+                                { color: '#14532d', name: 'Verde' },
+                                { color: '#7f1d1d', name: 'Vinho' },
+                                { color: '#b45309', name: 'Âmbar' },
+                              ].map((preset) => (
+                                <button
+                                  key={preset.color}
+                                  type="button"
+                                  onClick={() => setPlaylistForm({ ...playlistForm, custom_ticker_bg_color: preset.color })}
+                                  className="h-6 w-6 rounded-full border border-slate-600 transition hover:scale-110 cursor-pointer"
+                                  style={{ backgroundColor: preset.color }}
+                                  title={preset.name}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-blue-200 mb-1">
+                            Velocidade de Rolagem
+                          </label>
+                          <select
+                            value={playlistForm.custom_ticker_speed || 2}
+                            onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_speed: Number(e.target.value) })}
+                            className="w-full h-8 rounded-lg border border-slate-700 bg-slate-900 px-2 text-white text-xs focus:outline-none focus:border-blue-500"
+                          >
+                            <option value={1}>Lento (Leitura tranquila)</option>
+                            <option value={2}>Normal (Recomendado)</option>
+                            <option value={3}>Rápido</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Itens na Playlist */}
                 <div className="border-t border-slate-800 pt-3">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
@@ -3999,7 +4693,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                               <p className="text-white font-bold text-xs truncate" title={itemName}>
                                 {itemName}
                               </p>
-                              <div className="flex items-center gap-1.5 mt-0.5">
+                              <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                                 <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase ${
                                   itemType === 'rss'
                                     ? 'bg-rose-950/80 text-rose-300 border border-rose-800/60'
@@ -4011,6 +4705,48 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                                 }`}>
                                   {itemType === 'rss' ? 'Notícia RSS / Link' : itemType === 'weather_clock' ? 'Clima & Hora' : itemType === 'video' ? 'Vídeo' : 'Imagem'}
                                 </span>
+
+                                {/* Sugestão 1: Agendamento Inteligente Badge / Botão */}
+                                <button
+                                  type="button"
+                                  onClick={() => setScheduleModalItemIndex(idx)}
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 transition cursor-pointer ${
+                                    it.schedule_enabled
+                                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-600/80 hover:bg-emerald-900'
+                                      : 'bg-slate-900/90 text-slate-400 hover:text-white border border-slate-700/80 hover:border-blue-500'
+                                  }`}
+                                  title="Clique para programar dias e horários desta mídia"
+                                >
+                                  <Calendar className={`h-3 w-3 ${it.schedule_enabled ? 'text-emerald-400' : 'text-slate-400'}`} />
+                                  <span>{it.schedule_enabled ? 'Programado' : 'Agendar'}</span>
+                                </button>
+
+                                {/* Sugestão 4: Controle de Áudio por Vídeo */}
+                                {itemType === 'video' && (
+                                  <div className="flex items-center gap-1 bg-slate-900/90 px-1.5 py-0.5 rounded border border-slate-700/80">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const newItems = [...playlistForm.items];
+                                        newItems[idx].is_muted = !newItems[idx].is_muted;
+                                        setPlaylistForm({ ...playlistForm, items: newItems });
+                                      }}
+                                      className="cursor-pointer text-slate-300 hover:text-white"
+                                      title={it.is_muted ? 'Vídeo mudo (clique para ativar som)' : 'Som ativo (clique para mutar)'}
+                                    >
+                                      {it.is_muted ? (
+                                        <VolumeX className="h-3 w-3 text-rose-400" />
+                                      ) : (
+                                        <Volume2 className="h-3 w-3 text-emerald-400" />
+                                      )}
+                                    </button>
+                                    {!it.is_muted && (
+                                      <span className="text-[10px] text-slate-300 font-mono font-bold">
+                                        {it.volume !== undefined ? `${it.volume}%` : '100%'}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
 
@@ -5862,6 +6598,236 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* SUGESTÃO 1: MODAL DE AGENDAMENTO INTELIGENTE DE ITEM DE PLAYLIST */}
+      {scheduleModalItemIndex !== null && playlistForm.items[scheduleModalItemIndex] && (() => {
+        const item = playlistForm.items[scheduleModalItemIndex];
+        const media = mediaList.find((m) => m.id === item.media_id);
+        const itemName = media?.name || (item as any).name || 'Mídia da Playlist';
+        const itemType = media?.type || (item as any).type || 'image';
+
+        const updateItemField = (field: string, val: any) => {
+          const newItems = [...playlistForm.items];
+          newItems[scheduleModalItemIndex] = {
+            ...newItems[scheduleModalItemIndex],
+            [field]: val,
+          };
+          setPlaylistForm({ ...playlistForm, items: newItems });
+        };
+
+        const activeDays = Array.isArray(item.schedule_days) ? item.schedule_days : [0, 1, 2, 3, 4, 5, 6];
+
+        const toggleDay = (dayIndex: number) => {
+          const current = [...activeDays];
+          const exists = current.includes(dayIndex);
+          const updated = exists ? current.filter((d) => d !== dayIndex) : [...current, dayIndex].sort();
+          updateItemField('schedule_days', updated);
+        };
+
+        const daysLabels = [
+          { idx: 0, label: 'Dom', full: 'Domingo' },
+          { idx: 1, label: 'Seg', full: 'Segunda-feira' },
+          { idx: 2, label: 'Ter', full: 'Terça-feira' },
+          { idx: 3, label: 'Qua', full: 'Quarta-feira' },
+          { idx: 4, label: 'Qui', full: 'Quinta-feira' },
+          { idx: 5, label: 'Sex', full: 'Sexta-feira' },
+          { idx: 6, label: 'Sáb', full: 'Sábado' },
+        ];
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 p-0 sm:p-4 backdrop-blur-xs">
+            <div className="w-full max-w-lg rounded-t-2xl sm:rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl text-slate-100 flex flex-col max-h-[92vh] sm:max-h-[85vh] animate-in slide-in-from-bottom sm:slide-in-from-bottom-0">
+              {/* Header */}
+              <div className="shrink-0 px-5 py-3 sm:py-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <Calendar className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Agendamento Inteligente</h3>
+                    <p className="text-[11px] text-slate-400 truncate max-w-[280px]">
+                      {itemName} ({itemType === 'video' ? 'Vídeo' : itemType === 'rss' ? 'RSS' : 'Imagem'})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setScheduleModalItemIndex(null)}
+                  className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 text-xs">
+                {/* Toggle Agendamento */}
+                <div className="flex items-center justify-between p-3.5 rounded-xl border border-emerald-800/60 bg-emerald-950/20">
+                  <div>
+                    <label className="font-bold text-emerald-300 text-xs block cursor-pointer">
+                      Ativar Agendamento para esta Mídia
+                    </label>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Quando ativado, a TV reproduz este item apenas nos dias e horários configurados abaixo.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={item.schedule_enabled ?? false}
+                    onChange={(e) => updateItemField('schedule_enabled', e.target.checked)}
+                    className="rounded accent-emerald-500 h-5 w-5 cursor-pointer ml-3 shrink-0"
+                  />
+                </div>
+
+                {item.schedule_enabled && (
+                  <div className="space-y-4 animate-in fade-in">
+                    {/* Dias da Semana */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-800/40 p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <label className="font-bold text-slate-200 text-xs">
+                          Dias da Semana Permitidos
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => updateItemField('schedule_days', [0, 1, 2, 3, 4, 5, 6])}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 underline font-medium cursor-pointer"
+                          >
+                            Todos
+                          </button>
+                          <span className="text-slate-600">•</span>
+                          <button
+                            type="button"
+                            onClick={() => updateItemField('schedule_days', [1, 2, 3, 4, 5])}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 underline font-medium cursor-pointer"
+                          >
+                            Seg-Sex
+                          </button>
+                          <span className="text-slate-600">•</span>
+                          <button
+                            type="button"
+                            onClick={() => updateItemField('schedule_days', [0, 6])}
+                            className="text-[10px] text-blue-400 hover:text-blue-300 underline font-medium cursor-pointer"
+                          >
+                            Fim de Semana
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-7 gap-1.5 pt-1">
+                        {daysLabels.map((d) => {
+                          const isSelected = activeDays.includes(d.idx);
+                          return (
+                            <button
+                              key={d.idx}
+                              type="button"
+                              onClick={() => toggleDay(d.idx)}
+                              className={`py-2 px-1 rounded-lg text-xs font-bold transition text-center cursor-pointer ${
+                                isSelected
+                                  ? 'bg-emerald-600 text-white shadow-xs'
+                                  : 'bg-slate-800 text-slate-400 hover:text-white border border-slate-700'
+                              }`}
+                              title={d.full}
+                            >
+                              {d.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Janela de Horário */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-800/40 p-3.5 space-y-2.5">
+                      <label className="font-bold text-slate-200 text-xs block">
+                        Janela de Horário Diária (Início e Fim)
+                      </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-1">Horário de Início</label>
+                          <input
+                            type="time"
+                            value={item.schedule_start_time || ''}
+                            onChange={(e) => updateItemField('schedule_start_time', e.target.value)}
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-1">Horário de Término</label>
+                          <input
+                            type="time"
+                            value={item.schedule_end_time || ''}
+                            onChange={(e) => updateItemField('schedule_end_time', e.target.value)}
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        Deixe em branco para permitir a exibição durante o dia inteiro nos dias selecionados.
+                      </p>
+                    </div>
+
+                    {/* Período de Validade de Campanha (Datas) */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-800/40 p-3.5 space-y-2.5">
+                      <label className="font-bold text-slate-200 text-xs block">
+                        Período de Validade da Campanha (Opcional)
+                      </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-1">Data Inicial</label>
+                          <input
+                            type="date"
+                            value={item.schedule_start_date || ''}
+                            onChange={(e) => updateItemField('schedule_start_date', e.target.value)}
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-slate-400 mb-1">Data Limite (Expira em)</label>
+                          <input
+                            type="date"
+                            value={item.schedule_end_date || ''}
+                            onChange={(e) => updateItemField('schedule_end_date', e.target.value)}
+                            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-white text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        Após a data limite, a mídia para de rodar nas TVs sem necessidade de excluí-la da grade.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="shrink-0 p-4 border-t border-slate-800 bg-slate-900/95 flex items-center justify-between gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateItemField('schedule_enabled', false);
+                    updateItemField('schedule_days', [0, 1, 2, 3, 4, 5, 6]);
+                    updateItemField('schedule_start_time', '');
+                    updateItemField('schedule_end_time', '');
+                    updateItemField('schedule_start_date', '');
+                    updateItemField('schedule_end_date', '');
+                    setScheduleModalItemIndex(null);
+                  }}
+                  className="px-3 py-2 rounded-lg text-slate-400 hover:text-rose-400 text-xs font-semibold cursor-pointer transition"
+                >
+                  Limpar Regras
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScheduleModalItemIndex(null)}
+                  className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-md cursor-pointer"
+                >
+                  Concluir Agendamento
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* CONFIRMAÇÃO DE AÇÃO */}
       <ConfirmModal

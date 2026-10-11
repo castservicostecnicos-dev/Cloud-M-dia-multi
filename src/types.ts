@@ -95,6 +95,17 @@ export interface Player {
   last_seen: string;
   email?: string;
   access_token?: string;
+  // Sugestão 3: Efeito de transição padrão do player
+  transition_effect?: TransitionEffect;
+  // Sugestão 4: Volume Master do Player
+  master_volume?: number; // 0 a 100
+  master_muted?: boolean;
+  // Sugestão 5: Modo Economia e Descanso Noturno
+  eco_mode_enabled?: boolean;
+  eco_sleep_start?: string; // "22:00"
+  eco_sleep_end?: string; // "06:00"
+  eco_screen_type?: 'black' | 'clock' | 'dimmed';
+  is_sleeping?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -122,8 +133,20 @@ export interface PlaylistItem {
   name?: string;
   type?: 'image' | 'video' | 'rss' | 'weather_clock';
   file_url?: string;
+  // Sugestão 1: Agendamento Inteligente
+  schedule_enabled?: boolean;
+  schedule_days?: number[]; // [0,1,2,3,4,5,6] (0 = Domingo)
+  schedule_start_time?: string; // "HH:MM"
+  schedule_end_time?: string; // "HH:MM"
+  schedule_start_date?: string; // "YYYY-MM-DD"
+  schedule_end_date?: string; // "YYYY-MM-DD"
+  // Sugestão 4: Volume e Áudio
+  volume?: number; // 0 a 100
+  is_muted?: boolean;
   created_at: string;
 }
+
+export type TransitionEffect = 'crossfade' | 'slide' | 'zoom' | 'cut';
 
 export interface Playlist {
   id: string;
@@ -134,6 +157,14 @@ export interface Playlist {
   description: string;
   weather_city?: string;
   active: boolean;
+  // Sugestão 3: Efeito de Transição
+  transition_effect?: TransitionEffect;
+  transition_duration?: number;
+  // Sugestão 2: Letreiro Digital / Ticker
+  custom_ticker_enabled?: boolean;
+  custom_ticker_text?: string;
+  custom_ticker_bg_color?: string;
+  custom_ticker_speed?: number; // 1 (lento), 2 (normal), 3 (rápido)
   items: PlaylistItem[];
   created_at: string;
   updated_at: string;
@@ -346,5 +377,34 @@ export interface MediaIntegrityAuditReport {
   has_issues: boolean;
   issues: MediaIntegrityItemResult[];
   items: MediaIntegrityItemResult[];
+}
+
+export interface ProofOfPlayLog {
+  id: string;
+  company_id: string;
+  player_id: string;
+  player_name?: string;
+  store_id?: string | null;
+  media_id: string;
+  media_name?: string;
+  media_type?: string;
+  playlist_id?: string;
+  duration_seconds: number;
+  played_at: string;
+}
+
+export interface ProofOfPlaySummary {
+  totalPlays: number;
+  totalDurationSeconds: number;
+  uniquePlayers: number;
+  uniqueMedia: number;
+  topMedia: {
+    media_id: string;
+    media_name: string;
+    media_type?: string;
+    playCount: number;
+    totalSeconds: number;
+  }[];
+  recentLogs: ProofOfPlayLog[];
 }
 

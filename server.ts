@@ -9,7 +9,7 @@ import { loadMediaBinaryFromFirestore } from './server/firestore.js';
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   // Start Firestore restoration immediately in background, and let API routes await it (max 2.5s)
   const firestoreReadyPromise = Promise.race([

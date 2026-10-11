@@ -93,6 +93,17 @@ export interface Player {
   status: 'active' | 'inactive';
   access_token?: string;
   last_seen: string;
+  // Sugestão 3: Transições
+  transition_effect?: 'crossfade' | 'slide' | 'zoom' | 'cut';
+  // Sugestão 4: Volume Master do Player
+  master_volume?: number; // 0 a 100
+  master_muted?: boolean;
+  // Sugestão 5: Modo Economia Noturno
+  eco_mode_enabled?: boolean;
+  eco_sleep_start?: string; // "22:00"
+  eco_sleep_end?: string; // "06:00"
+  eco_screen_type?: 'black' | 'clock' | 'dimmed';
+  is_sleeping?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -119,6 +130,16 @@ export interface PlaylistItem {
   name?: string;
   type?: 'image' | 'video' | 'rss' | 'weather_clock';
   file_url?: string;
+  // Sugestão 1: Agendamento Inteligente
+  schedule_enabled?: boolean;
+  schedule_days?: number[]; // [0,1,2,3,4,5,6]
+  schedule_start_time?: string; // "08:00"
+  schedule_end_time?: string; // "18:00"
+  schedule_start_date?: string; // "2026-10-01"
+  schedule_end_date?: string; // "2026-10-31"
+  // Sugestão 4: Volume por mídia
+  volume?: number; // 0 a 100
+  is_muted?: boolean;
   created_at: string;
 }
 
@@ -130,6 +151,14 @@ export interface Playlist {
   description: string;
   weather_city?: string;
   active: boolean;
+  // Sugestão 3: Transição padrão
+  transition_effect?: 'crossfade' | 'slide' | 'zoom' | 'cut';
+  transition_duration?: number;
+  // Sugestão 2: Letreiro Digital
+  custom_ticker_enabled?: boolean;
+  custom_ticker_text?: string;
+  custom_ticker_bg_color?: string;
+  custom_ticker_speed?: number;
   items: PlaylistItem[];
   created_at: string;
   updated_at: string;
@@ -395,6 +424,20 @@ export interface DriveSettings {
   service_account_json?: string;
 }
 
+export interface ProofOfPlayLog {
+  id: string;
+  company_id: string;
+  player_id: string;
+  player_name?: string;
+  store_id?: string | null;
+  media_id: string;
+  media_name?: string;
+  media_type?: string;
+  playlist_id?: string;
+  duration_seconds: number;
+  played_at: string;
+}
+
 export interface DatabaseSchema {
   users: User[];
   companies: Company[];
@@ -410,6 +453,7 @@ export interface DatabaseSchema {
   sub_clients: SubClient[];
   drive_documents: DriveDocument[];
   drive_settings: DriveSettings;
+  proof_of_play_logs?: ProofOfPlayLog[];
   sessions?: AuthSession[];
 }
 
@@ -638,6 +682,10 @@ class DatabaseStore {
           this.data.sessions = [];
           changed = true;
         }
+        if (!this.data.proof_of_play_logs) {
+          this.data.proof_of_play_logs = [];
+          changed = true;
+        }
 
         // Ensure all players have a unique persistent access_token for direct URL auto-start
         if (this.data.players && Array.isArray(this.data.players)) {
@@ -752,6 +800,7 @@ class DatabaseStore {
           sub_clients: this.mergeById(cloudData.sub_clients, localData.sub_clients),
           drive_documents: this.mergeById(cloudData.drive_documents, localData.drive_documents),
           drive_settings: mergedDriveSettings,
+          proof_of_play_logs: [...(cloudData.proof_of_play_logs || []), ...(localData.proof_of_play_logs || [])].slice(-2000),
           sessions: Array.from(sessionMap.values()).slice(-200),
         };
 
@@ -1136,6 +1185,7 @@ class DatabaseStore {
         connected: false,
         root_folder_name: 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
       },
+      proof_of_play_logs: [],
       sessions: [],
     };
   }

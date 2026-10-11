@@ -1,4 +1,4 @@
-import { Role, User, Company, CompanyStore, Plan, Player, Operator, Playlist, Media, RssFeed, RssPreset, RssArticle, CallPhrase, PlayerCall, AdminStats, CompanyStats, WeatherData, MediaIntegrityAuditReport } from '../types';
+import { Role, User, Company, CompanyStore, Plan, Player, Operator, Playlist, Media, RssFeed, RssPreset, RssArticle, CallPhrase, PlayerCall, AdminStats, CompanyStats, WeatherData, MediaIntegrityAuditReport, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog } from '../types';
 import { handleClientFallbackRequest } from './clientFirestoreFallback';
 
 const TOKEN_KEY = 'indoor_media_token';
@@ -259,6 +259,11 @@ export const api = {
     request<{ message: string; access_token: string; player: Player }>(`/company/players/${id}/regenerate-token`, {
       method: 'POST',
     }),
+  // Sugestão 5: Colocar player em descanso ou acordar remotamente
+  togglePlayerSleep: (id: string) =>
+    request<{ status: string; is_sleeping: boolean; message: string }>(`/company/players/${id}/toggle-sleep`, {
+      method: 'POST',
+    }),
 
   getCompanyOperators: () =>
     request<Operator[]>('/company/operators').then((r) => ensureArray<Operator>(r, 'operators')),
@@ -436,9 +441,28 @@ export const api = {
     if (token) params.append('token', token);
     const qs = params.toString();
     return request<{
-      player: Pick<Player, 'id' | 'name' | 'code' | 'access_token' | 'location' | 'orientation'>;
+      player: Pick<Player, 'id' | 'name' | 'code' | 'access_token' | 'location' | 'orientation'> & {
+        transition_effect?: TransitionEffect;
+        master_volume?: number;
+        master_muted?: boolean;
+        eco_mode_enabled?: boolean;
+        eco_sleep_start?: string;
+        eco_sleep_end?: string;
+        eco_screen_type?: 'black' | 'clock' | 'dimmed';
+        is_sleeping?: boolean;
+      };
       company: { id: string; name: string };
-      playlist: { id: string; name: string; weather_city?: string } | null;
+      playlist: {
+        id: string;
+        name: string;
+        weather_city?: string;
+        transition_effect?: TransitionEffect;
+        transition_duration?: number;
+        custom_ticker_enabled?: boolean;
+        custom_ticker_text?: string;
+        custom_ticker_bg_color?: string;
+        custom_ticker_speed?: number;
+      } | null;
       weatherCity?: string;
       items: Array<{
         id: string;
@@ -448,9 +472,40 @@ export const api = {
         name: string;
         type: 'image' | 'video' | 'rss' | 'weather_clock';
         file_url: string;
+        schedule_enabled?: boolean;
+        schedule_days?: number[];
+        schedule_start_time?: string;
+        schedule_end_time?: string;
+        schedule_start_date?: string;
+        schedule_end_date?: string;
+        volume?: number;
+        is_muted?: boolean;
       }>;
       rssFeeds: RssFeed[];
     }>(qs ? `/player/current?${qs}` : '/player/current');
+  },
+
+  // Sugestão 6: Prova de Exibição & Analytics
+  recordProofOfPlay: (data: {
+    player_id: string;
+    media_id: string;
+    playlist_id?: string;
+    duration_seconds: number;
+  }) =>
+    request<{ status: string; logId: string }>('/player/proof-of-play', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getProofOfPlaySummary: (params?: { playerId?: string; mediaId?: string; days?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.playerId) query.append('playerId', params.playerId);
+    if (params?.mediaId) query.append('mediaId', params.mediaId);
+    if (params?.days) query.append('days', String(params.days));
+    const qs = query.toString();
+    return request<{ summary: ProofOfPlaySummary; logsCount: number }>(
+      `/company/proof-of-play${qs ? `?${qs}` : ''}`
+    );
   },
 
   sendHeartbeat: (playerId: string, code?: string, token?: string) =>
