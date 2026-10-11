@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 1. Mídia Indoor (Painel de Gestão, Telas de TV, Chamada de Senhas em Tempo Real)
+  midia-indoor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: app-midia-indoor
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-gen-lang-client-0937994667}
+      - FIRESTORE_DATABASE_ID=${FIRESTORE_DATABASE_ID:-ai-studio-mdiaindoor-0ee6f26d-4225-42ad-910a-5d51615f2900}
+      - FIREBASE_API_KEY=${FIREBASE_API_KEY}
+    volumes:
+      - midia_uploads:/app/uploads
+
+  # 2. Inspect (App de Vistorias)
+  # inspect-app:
+  #   image: seu-usuario/inspect-app:latest # ou build local: context: ../inspect
+  #   container_name: app-inspect
+  #   restart: always
+  #   ports:
+  #     - "3001:3000"
+  #   environment:
+  #     - PORT=3000
+
+  # 3. Quote (App de Orçamentos)
+  # quote-app:
+  #   image: seu-usuario/quote-app:latest
+  #   container_name: app-quote
+  #   restart: always
+  #   ports:
+  #     - "3002:3000"
+  #   environment:
+  #     - PORT=3000
+
+  # 4. Calculadora Térmica
+  # calculadora-app:
+  #   image: seu-usuario/calculadora-app:latest
+  #   container_name: app-calculadora
+  #   restart: always
+  #   ports:
+  #     - "3003:3000"
+
+  # 5. Orçamento Solar
+  # solar-app:
+  #   image: seu-usuario/solar-app:latest
+  #   container_name: app-solar
+  #   restart: always
+  #   ports:
+  #     - "3004:3000"
+
+volumes:
+  midia_uploads:
+    driver: local

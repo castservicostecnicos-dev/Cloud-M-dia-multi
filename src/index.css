@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/* Previne qualquer rolagem horizontal ou deslocamento lateral em telas mobile */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  -webkit-text-size-adjust: 100%;
+}
+
+#root {
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Ticker contínuo profissional (Seamless Infinite Ticker) */
+@keyframes ticker-slide {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-ticker {
+  display: inline-flex;
+  white-space: nowrap;
+  width: max-content;
+  animation: ticker-slide 119s linear infinite;
+  will-change: transform;
+}
+
+.animate-ticker:hover {
+  animation-play-state: paused;
+}
+
+/* Fallback legacy class */
+.animate-marquee {
+  display: inline-flex;
+  white-space: nowrap;
+  width: max-content;
+  animation: ticker-slide 119s linear infinite;
+  will-change: transform;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+

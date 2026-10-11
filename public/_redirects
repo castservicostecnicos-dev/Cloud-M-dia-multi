@@ -1,0 +1,3 @@
+# Cloudflare Pages SPA Routing rule
+# Permite que todas as rotas do frontend React/Vite (PWA, rotas de player, login, admin) carreguem sem erro 404
+/* /index.html 200

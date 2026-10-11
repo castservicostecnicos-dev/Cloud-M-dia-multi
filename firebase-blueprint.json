@@ -1,0 +1,81 @@
+{
+  "entities": {
+    "system_meta": {
+      "title": "SystemMeta",
+      "description": "System metadata and health pings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "number" }
+      }
+    },
+    "app_data": {
+      "title": "AppData",
+      "description": "Core serialized database store for persistent company and media data",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "updated_at": { "type": "string" }
+      }
+    },
+    "companies": {
+      "title": "Company",
+      "description": "Companies registered in the indoor media platform",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "trade_name": { "type": "string" },
+        "legal_name": { "type": "string" },
+        "cnpj": { "type": "string" },
+        "email": { "type": "string" },
+        "is_network": { "type": "boolean" }
+      }
+    },
+    "company_stores": {
+      "title": "CompanyStore",
+      "description": "Stores / branches belonging to a company network",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "company_id": { "type": "string" },
+        "name": { "type": "string" },
+        "brand_name": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" }
+      }
+    },
+    "users": {
+      "title": "User",
+      "description": "System user accounts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/system_meta/{metaId}": {
+      "schema": "system_meta",
+      "description": "System health and ping records"
+    },
+    "/app_data/{docId}": {
+      "schema": "app_data",
+      "description": "Core serialized database store for persistence"
+    },
+    "/companies/{companyId}": {
+      "schema": "companies",
+      "description": "Companies registered in the indoor media platform"
+    },
+    "/company_stores/{storeId}": {
+      "schema": "company_stores",
+      "description": "Stores / branches belonging to a company network"
+    },
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profiles and credentials"
+    }
+  }
+}
