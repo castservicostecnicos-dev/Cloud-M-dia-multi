@@ -1,4 +1,4 @@
-import { Role, User, Company, CompanyStore, Plan, Player, Operator, Playlist, Media, RssFeed, RssPreset, RssArticle, CallPhrase, PlayerCall, AdminStats, CompanyStats, WeatherData, MediaIntegrityAuditReport, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog } from '../types';
+import { Role, User, Company, CompanyStore, Plan, Player, Operator, Playlist, Media, RssFeed, RssPreset, RssArticle, CallPhrase, PlayerCall, AdminStats, CompanyStats, WeatherData, MediaIntegrityAuditReport, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog, R2Settings } from '../types';
 import { handleClientFallbackRequest } from './clientFirestoreFallback';
 
 const TOKEN_KEY = 'indoor_media_token';
@@ -568,6 +568,43 @@ export const api = {
       message?: string;
       error?: string;
     }>('/drive/test-connection', {
+      method: 'POST',
+    }),
+
+  // Cloudflare R2 Object Storage
+  getR2Settings: () =>
+    request<{
+      status: string;
+      settings: R2Settings & { has_secret: boolean; is_configured: boolean };
+    }>('/r2/settings'),
+
+  updateR2Settings: (data: Partial<R2Settings>) =>
+    request<{
+      status: string;
+      settings: R2Settings & { is_configured: boolean };
+      testResult?: any;
+    }>('/r2/settings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  testR2Connection: (data?: Partial<R2Settings>) =>
+    request<{
+      success: boolean;
+      message: string;
+      details?: any;
+    }>('/r2/test', {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    }),
+
+  syncLocalMediaToR2: () =>
+    request<{
+      status: string;
+      syncedCount: number;
+      errorsCount: number;
+      errors: string[];
+    }>('/r2/sync-local-media', {
       method: 'POST',
     }),
   ensureDriveClientFoldersServer: (params: { clientName: string; customRootName?: string; clientDriveToken?: string }) =>

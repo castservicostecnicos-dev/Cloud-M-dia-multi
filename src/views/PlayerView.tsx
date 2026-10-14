@@ -979,8 +979,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             : 'w-full h-full'
         }`}
       >
-        {/* 1. MÍDIA ATUAL (IMAGEM OU VÍDEO COM TRANSIÇÕES E VOLUME) */}
-        <div className="relative flex-1 w-full h-full overflow-hidden bg-black flex items-center justify-center">
+        {/* 1. MÍDIA ATUAL (IMAGEM OU VÍDEO COM TRANSIÇÕES E VOLUME) - TELA COMPLETA */}
+        <div className="relative w-full h-full overflow-hidden bg-black flex items-center justify-center">
           {effectiveItems.length === 0 ? (
             <div className="text-center p-8 text-slate-500 max-w-md">
               <p className="text-xl font-bold text-slate-400">Sem mídias ativas nesta janela de horário</p>
@@ -1061,69 +1061,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             </div>
           )}
         </div>
-
-        {/* 2. SUGESTÃO 2: LETREIRO DIGITAL & TICKER DE RODAPÉ (TICKER EM TEMPO REAL) */}
-        {!activeCall && (
-          <div
-            style={{
-              backgroundColor: data?.playlist?.custom_ticker_bg_color || '#090d16',
-            }}
-            className="relative z-30 flex items-stretch h-10 sm:h-12 w-full border-t border-slate-800 shadow-2xl overflow-hidden text-white"
-          >
-            {/* Bloco de Relógio & Clima à esquerda */}
-            <div className="shrink-0 flex items-center gap-2.5 px-3 sm:px-4 bg-slate-900/90 border-r border-slate-800 z-10 text-xs font-semibold font-mono">
-              <Clock className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-              <span className="font-bold text-white tracking-wider">{currentTime}</span>
-              <span className="text-slate-600 hidden sm:inline">|</span>
-              <span className="text-slate-300 text-[11px] hidden sm:inline">{weatherData.temp}°C</span>
-            </div>
-
-            {/* Letreiro em movimento contínuo (Marquee Ticker) */}
-            <div className="flex-1 overflow-hidden relative flex items-center">
-              <div
-                className="whitespace-nowrap flex items-center gap-12 font-medium text-xs sm:text-sm tracking-wide text-slate-200 animate-ticker"
-                style={{
-                  animationDuration:
-                    data?.playlist?.custom_ticker_speed === 1
-                      ? '160s'
-                      : data?.playlist?.custom_ticker_speed === 3
-                      ? '60s'
-                      : '100s',
-                }}
-              >
-                {data?.playlist?.custom_ticker_enabled && data.playlist.custom_ticker_text ? (
-                  <>
-                    <span className="flex items-center gap-2 text-amber-300 font-bold">
-                      <Radio className="h-3.5 w-3.5 text-amber-400 animate-pulse" />
-                      {data.playlist.custom_ticker_text}
-                    </span>
-                    <span className="text-slate-500">•</span>
-                    <span>{data.playlist.custom_ticker_text}</span>
-                    <span className="text-slate-500">•</span>
-                    <span className="text-blue-300">{data.player.name} • {data.company.name}</span>
-                    <span className="text-slate-500">•</span>
-                    <span>{data.playlist.custom_ticker_text}</span>
-                  </>
-                ) : (
-                  (rssHeadlines.length > 0 ? rssHeadlines : DEFAULT_HEADLINES).map((hl, idx) => (
-                    <React.Fragment key={idx}>
-                      <span className="inline-flex items-center gap-2">
-                        <span className="h-1.5 w-1.5 rounded-full bg-blue-400 shrink-0" />
-                        {hl}
-                      </span>
-                      <span className="text-slate-600 font-bold">•</span>
-                    </React.Fragment>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Badge da Empresa / Player à direita */}
-            <div className="shrink-0 hidden md:flex items-center gap-2 px-3 bg-slate-900/90 border-l border-slate-800 z-10 text-[11px] font-bold text-slate-300">
-              <span className="truncate max-w-[140px] text-blue-400">{data?.player?.name}</span>
-            </div>
-          </div>
-        )}
 
         {/* 3. OVERLAY DA CHAMADA EM DESTAQUE TOTAL (SOBREPÕE QUANDO HÁ CHAMADA) */}
         {activeCall && (

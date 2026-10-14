@@ -37,11 +37,13 @@ import {
   Store,
   MapPin,
   GitBranch,
+  Cloud,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Company, CompanyStore, Plan, AdminStats, MediaIntegrityAuditReport } from '../types';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { GoogleDriveFileManager } from '../components/GoogleDriveFileManager';
+import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
 
 interface AdminDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -156,6 +158,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSeedDemoData,
 }) => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'companies' | 'plans' | 'drive'>('dashboard');
+  const [r2ModalOpen, setR2ModalOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [selectedDemoClient, setSelectedDemoClient] = useState<'comp-1' | 'comp-2'>('comp-1');
   const [stats, setStats] = useState<AdminStats>({
@@ -957,6 +960,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <UploadCloud className="h-3.5 w-3.5 text-blue-400 shrink-0" />
             <span className="truncate">Google Drive</span>
+          </button>
+
+          <button
+            id="btn-admin-r2"
+            type="button"
+            onClick={() => setR2ModalOpen(true)}
+            className="w-full lg:w-auto justify-center flex items-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider bg-orange-600/20 hover:bg-orange-600/35 text-orange-200 border border-orange-500/40 shadow-sm transition cursor-pointer text-center"
+            title="Configurar Cloudflare R2 para armazenamento permanente definitivo com tráfego 100% grátis"
+          >
+            <Cloud className="h-3.5 w-3.5 text-orange-400 shrink-0" />
+            <span className="truncate">Cloudflare R2</span>
           </button>
 
           {onOpenPresentation && (
@@ -3531,6 +3545,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL CONFIGURAÇÃO CLOUDFLARE R2 */}
+      <CloudflareR2ConfigModal
+        isOpen={r2ModalOpen}
+        onClose={() => setR2ModalOpen(false)}
+      />
 
       {/* CONFIRMAÇÃO DE AÇÃO */}
       <ConfirmModal

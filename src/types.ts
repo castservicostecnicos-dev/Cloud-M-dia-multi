@@ -340,6 +340,19 @@ export interface DriveSettings {
   service_account_json?: string;
 }
 
+export interface R2Settings {
+  enabled: boolean;
+  account_id?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  bucket_name?: string;
+  public_domain?: string;
+  auto_upload_on_add?: boolean;
+  last_tested_at?: string;
+  last_test_status?: 'success' | 'error';
+  last_test_message?: string;
+}
+
 export interface MediaIntegrityItemResult {
   media_id: string;
   name: string;

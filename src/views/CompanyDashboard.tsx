@@ -56,6 +56,8 @@ import {
   Download,
   Sliders,
   Palette,
+  Info,
+  Cloud,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { CompanyStats, CompanyStore, Player, Operator, Playlist, Media, RssFeed, Company, MediaIntegrityAuditReport, MediaIntegrityItemResult, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog, PlaylistItem } from '../types';
@@ -63,6 +65,7 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { MediaThumbnail } from '../components/MediaThumbnail';
 import { MediaPreviewModal } from '../components/MediaPreviewModal';
 import { PlayerDiagnosticView, DiagnosticPlayerData } from '../components/PlayerDiagnosticView';
+import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
 import { resolveMediaDisplayUrl, getCachedToken, setCachedAccessToken } from '../lib/googleDrive';
 
 interface CompanyDashboardProps {
@@ -179,6 +182,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
   // Quick RSS Selection Modal inside Playlist Builder
   const [rssQuickPickerOpen, setRssQuickPickerOpen] = useState(false);
+
+  // Cloudflare R2 Modal State
+  const [r2ModalOpen, setR2ModalOpen] = useState(false);
 
   // Send RSS/Weather directly to playlist target modal (when user triggers from RSS tab or Playlists tab)
   const [playlistTargetModal, setPlaylistTargetModal] = useState<{
@@ -3015,6 +3021,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               </button>
 
               <button
+                id="btn-open-r2-modal"
+                type="button"
+                onClick={() => setR2ModalOpen(true)}
+                className="w-full sm:w-auto justify-center flex items-center gap-2 rounded-lg border border-orange-500/40 bg-orange-600/20 px-3 py-2 text-xs font-bold uppercase tracking-wider text-orange-200 shadow-sm hover:bg-orange-600/35 hover:text-white transition cursor-pointer text-center"
+                title="Configurar Cloudflare R2 para armazenamento definitivo com tráfego 100% grátis e sem expiração de token"
+              >
+                <Cloud className="h-4 w-4 shrink-0 text-orange-400" />
+                <span className="truncate">Cloudflare R2</span>
+              </button>
+
+              <button
                 id="btn-open-media-modal"
                 onClick={() => {
                   resetMediaModalState();
@@ -3832,10 +3849,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
-                      {proofOfPlaySummary.recentLogs.slice(0, 50).map((log) => {
-                        const dateFormatted = new Date(log.played_at).toLocaleString('pt-BR');
-                        return (
-                          <tr key={log.id} className="hover:bg-slate-800/40 transition">
+                      {proofOfPlaySummary.recentLogs
+                        .filter((log, idx, arr) => arr.findIndex((l) => l.id === log.id) === idx)
+                        .slice(0, 50)
+                        .map((log, idx) => {
+                          const dateFormatted = new Date(log.played_at).toLocaleString('pt-BR');
+                          const rowKey = log.id ? `${log.id}-${idx}` : `log-${idx}`;
+                          return (
+                            <tr key={rowKey} className="hover:bg-slate-800/40 transition">
                             <td className="py-2.5 font-mono text-[11px] text-slate-300">
                               {dateFormatted}
                             </td>
@@ -4450,91 +4471,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <p className="text-[11px] text-slate-400">
                     Define como as mídias se alternam visualmente nas TVs vinculadas a esta playlist.
                   </p>
-                </div>
-
-                {/* Sugestão 2: Letreiro Digital Customizado (Ticker de Rodapé) */}
-                <div className="rounded-xl border border-blue-900/50 bg-blue-950/20 p-3.5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="font-bold text-blue-300 flex items-center gap-1.5 text-xs cursor-pointer">
-                      <Radio className="h-4 w-4 text-blue-400" />
-                      <span>Letreiro Digital no Rodapé (Ticker de Avisos / Ofertas)</span>
-                    </label>
-                    <input
-                      type="checkbox"
-                      checked={playlistForm.custom_ticker_enabled ?? false}
-                      onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_enabled: e.target.checked })}
-                      className="rounded accent-blue-500 h-4 w-4 cursor-pointer"
-                    />
-                  </div>
-                  <p className="text-[11px] text-slate-400">
-                    Exibe uma faixa contínua animada no rodapé da TV com avisos institucionais, novidades e ofertas.
-                  </p>
-
-                  {playlistForm.custom_ticker_enabled && (
-                    <div className="pt-2 border-t border-blue-900/40 space-y-3 animate-in fade-in">
-                      <div>
-                        <label className="block text-[11px] font-bold text-blue-200 mb-1">
-                          Texto do Letreiro Deslizante
-                        </label>
-                        <textarea
-                          rows={2}
-                          value={playlistForm.custom_ticker_text || ''}
-                          onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_text: e.target.value })}
-                          placeholder="Ex: 🎉 Bem-vindo à nossa loja! • Confira as ofertas da semana no balcão • Atendimento das 08h às 20h"
-                          className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-white text-xs focus:outline-none focus:border-blue-500"
-                        />
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-[11px] font-bold text-blue-200 mb-1">
-                            Cor da Faixa
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="color"
-                              value={playlistForm.custom_ticker_bg_color || '#0f172a'}
-                              onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_bg_color: e.target.value })}
-                              className="h-8 w-10 rounded cursor-pointer border border-slate-700 bg-transparent"
-                            />
-                            <div className="flex items-center gap-1">
-                              {[
-                                { color: '#0f172a', name: 'Escuro' },
-                                { color: '#1e3a8a', name: 'Azul' },
-                                { color: '#14532d', name: 'Verde' },
-                                { color: '#7f1d1d', name: 'Vinho' },
-                                { color: '#b45309', name: 'Âmbar' },
-                              ].map((preset) => (
-                                <button
-                                  key={preset.color}
-                                  type="button"
-                                  onClick={() => setPlaylistForm({ ...playlistForm, custom_ticker_bg_color: preset.color })}
-                                  className="h-6 w-6 rounded-full border border-slate-600 transition hover:scale-110 cursor-pointer"
-                                  style={{ backgroundColor: preset.color }}
-                                  title={preset.name}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div>
-                          <label className="block text-[11px] font-bold text-blue-200 mb-1">
-                            Velocidade de Rolagem
-                          </label>
-                          <select
-                            value={playlistForm.custom_ticker_speed || 2}
-                            onChange={(e) => setPlaylistForm({ ...playlistForm, custom_ticker_speed: Number(e.target.value) })}
-                            className="w-full h-8 rounded-lg border border-slate-700 bg-slate-900 px-2 text-white text-xs focus:outline-none focus:border-blue-500"
-                          >
-                            <option value={1}>Lento (Leitura tranquila)</option>
-                            <option value={2}>Normal (Recomendado)</option>
-                            <option value={3}>Rápido</option>
-                          </select>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 {/* Itens na Playlist */}
@@ -6828,6 +6764,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           </div>
         );
       })()}
+
+      {/* MODAL CONFIGURAÇÃO CLOUDFLARE R2 */}
+      <CloudflareR2ConfigModal
+        isOpen={r2ModalOpen}
+        onClose={() => setR2ModalOpen(false)}
+        onSaved={loadData}
+      />
 
       {/* CONFIRMAÇÃO DE AÇÃO */}
       <ConfirmModal

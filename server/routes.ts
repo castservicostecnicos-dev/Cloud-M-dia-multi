@@ -29,6 +29,15 @@ import {
 import { realtimeHub } from './realtime.js';
 import { runMediaIntegrityAudit, MediaIntegrityAuditReport } from './mediaIntegrity.js';
 import { saveMediaBinaryToFirestore } from './firestore.js';
+import {
+  uploadToR2,
+  getEffectiveR2Config,
+  isR2Configured,
+  testR2Connection,
+  deleteFromR2,
+  buildR2PublicUrl,
+} from './r2.js';
+import { R2Settings } from '../src/types';
 
 export const apiRouter = Router();
 
@@ -2123,7 +2132,7 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
 });
 
 // Chunked File Upload from Device (bypasses Cloud Run / proxy 32MB request limits)
-apiRouter.post('/upload/chunk', requireAuth, (req: AuthenticatedRequest, res) => {
+apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const { uploadId, chunkIndex, totalChunks, chunkData, filename, mimeType } = req.body;
     if (!uploadId || chunkData === undefined || chunkIndex === undefined || !totalChunks) {
@@ -2178,9 +2187,30 @@ apiRouter.post('/upload/chunk', requireAuth, (req: AuthenticatedRequest, res) =>
     if (isLastChunk) {
       const fullBuffer = fs.readFileSync(filePath);
       saveMediaBinaryToFirestore(uniqueName, mimeType || 'application/octet-stream', fullBuffer).catch(() => {});
+
+      let finalUrl = `/uploads/${uniqueName}`;
+      let r2Url: string | undefined = undefined;
+      const r2Config = getEffectiveR2Config();
+      if (r2Config.enabled && isR2Configured(r2Config)) {
+        try {
+          const r2Res = await uploadToR2({
+            buffer: fullBuffer,
+            key: uniqueName,
+            contentType: mimeType || 'application/octet-stream',
+          });
+          r2Url = r2Res.publicUrl;
+          finalUrl = r2Res.publicUrl;
+          console.log('[Cloudflare R2] Arquivo enviado com sucesso via chunked upload:', r2Url);
+        } catch (r2Err: any) {
+          console.warn('[Cloudflare R2] Falha no upload automático (mantendo cópia local):', r2Err.message);
+        }
+      }
+
       return res.json({
         status: 'completed',
-        url: `/uploads/${uniqueName}`,
+        url: finalUrl,
+        localUrl: `/uploads/${uniqueName}`,
+        r2Url,
         filename: uniqueName,
         size: fullBuffer.length,
       });
@@ -2198,7 +2228,7 @@ apiRouter.post('/upload/chunk', requireAuth, (req: AuthenticatedRequest, res) =>
 });
 
 // Direct File Upload from Device
-apiRouter.post('/upload', requireAuth, (req: AuthenticatedRequest, res) => {
+apiRouter.post('/upload', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const { fileData, filename, mimeType } = req.body;
     if (!fileData) {
@@ -2254,8 +2284,28 @@ apiRouter.post('/upload', requireAuth, (req: AuthenticatedRequest, res) => {
       detectedExt === 'ogv' ||
       (mimeType && mimeType.startsWith('video/'));
 
+    let finalUrl = `/uploads/${uniqueName}`;
+    let r2Url: string | undefined = undefined;
+    const r2Config = getEffectiveR2Config();
+    if (r2Config.enabled && isR2Configured(r2Config)) {
+      try {
+        const r2Res = await uploadToR2({
+          buffer,
+          key: uniqueName,
+          contentType: mimeType || (isVideo ? 'video/mp4' : 'image/jpeg'),
+        });
+        r2Url = r2Res.publicUrl;
+        finalUrl = r2Res.publicUrl;
+        console.log('[Cloudflare R2] Arquivo enviado com sucesso via direct upload:', r2Url);
+      } catch (r2Err: any) {
+        console.warn('[Cloudflare R2] Falha no upload automático (mantendo cópia local):', r2Err.message);
+      }
+    }
+
     res.json({
-      url: `/uploads/${uniqueName}`,
+      url: finalUrl,
+      localUrl: `/uploads/${uniqueName}`,
+      r2Url,
       filename: uniqueName,
       originalName: filename,
       size: buffer.length,
@@ -3486,9 +3536,19 @@ apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (re
     filtered = filtered.filter((l) => l.media_id === mediaId);
   }
 
+  // Deduplicar logs por id para garantir unicidade e consistência estrita
+  const seenLogIds = new Set<string>();
+  const uniqueFiltered: ProofOfPlayLog[] = [];
+  for (const log of filtered) {
+    if (log && log.id && !seenLogIds.has(log.id)) {
+      seenLogIds.add(log.id);
+      uniqueFiltered.push(log);
+    }
+  }
+
   // Agrupar por mídia
   const mediaMap = new Map<string, { media_id: string; media_name: string; media_type?: string; playCount: number; totalSeconds: number }>();
-  for (const log of filtered) {
+  for (const log of uniqueFiltered) {
     const existing = mediaMap.get(log.media_id);
     if (existing) {
       existing.playCount += 1;
@@ -3505,10 +3565,10 @@ apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (re
   }
 
   const topMedia = Array.from(mediaMap.values()).sort((a, b) => b.playCount - a.playCount);
-  const totalPlays = filtered.length;
-  const totalDurationSeconds = filtered.reduce((acc, l) => acc + l.duration_seconds, 0);
-  const uniquePlayers = new Set(filtered.map((l) => l.player_id)).size;
-  const uniqueMedia = new Set(filtered.map((l) => l.media_id)).size;
+  const totalPlays = uniqueFiltered.length;
+  const totalDurationSeconds = uniqueFiltered.reduce((acc, l) => acc + l.duration_seconds, 0);
+  const uniquePlayers = new Set(uniqueFiltered.map((l) => l.player_id)).size;
+  const uniqueMedia = new Set(uniqueFiltered.map((l) => l.media_id)).size;
 
   res.json({
     summary: {
@@ -3517,9 +3577,9 @@ apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (re
       uniquePlayers,
       uniqueMedia,
       topMedia,
-      recentLogs: filtered.slice(-100).reverse(),
+      recentLogs: uniqueFiltered.slice(-100).reverse(),
     },
-    logsCount: filtered.length,
+    logsCount: uniqueFiltered.length,
   });
 });
 
@@ -4331,14 +4391,18 @@ apiRouter.post('/drive/settings', (req, res) => {
     service_account_json,
   } = req.body;
 
+  const current = db.getDriveSettings();
+  const targetEmail = account_email || current.account_email || 'cast.servicostecnicos@gmail.com';
+  const targetName = account_name || current.account_name || 'Conta da Empresa';
+
   const updated = db.updateDriveSettings({
-    connected: true, // Sempre ativo para cast.servicostecnicos@gmail.com
-    account_email: 'cast.servicostecnicos@gmail.com',
-    account_name: 'CAST Serviços Técnicos',
+    connected: true,
+    account_email: targetEmail,
+    account_name: targetName,
     account_photo,
-    root_folder_id: root_folder_id || '19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
-    root_folder_name: root_folder_name || 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
-    root_folder_url: root_folder_url || 'https://drive.google.com/drive/folders/19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
+    root_folder_id: root_folder_id || current.root_folder_id || '19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
+    root_folder_name: root_folder_name || current.root_folder_name || 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
+    root_folder_url: root_folder_url || current.root_folder_url || 'https://drive.google.com/drive/folders/19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
     access_token,
     refresh_token,
     token_expiry,
@@ -4355,15 +4419,17 @@ apiRouter.post('/drive/test-connection', requireAuth, async (req: AuthenticatedR
   try {
     const token = await getValidDriveServerToken();
     const driveSettings = db.getDriveSettings();
+    const currentEmail = driveSettings.account_email || 'Conta da Empresa';
+    const currentName = driveSettings.account_name || 'Minha Empresa';
 
     if (!token) {
       return res.json({
         status: 'ok',
         connected: true,
         expired: true,
-        account_email: 'cast.servicostecnicos@gmail.com',
-        account_name: 'CAST Serviços Técnicos',
-        message: 'Conta cast.servicostecnicos@gmail.com configurada no sistema. Sincronize o acesso do Google para renovar o token.',
+        account_email: currentEmail,
+        account_name: currentName,
+        message: `Conta ${currentEmail} configurada no sistema. Sincronize o acesso do Google para renovar o token.`,
       });
     }
 
@@ -4377,38 +4443,210 @@ apiRouter.post('/drive/test-connection', requireAuth, async (req: AuthenticatedR
         status: 'ok',
         connected: true,
         expired: true,
-        account_email: 'cast.servicostecnicos@gmail.com',
-        account_name: 'CAST Serviços Técnicos',
-        message: 'Conta cast.servicostecnicos@gmail.com ativa. Clique em Atualizar Acesso Google para revalidar quando desejar.',
+        account_email: currentEmail,
+        account_name: currentName,
+        message: `Conta ${currentEmail} ativa. Clique em Atualizar Acesso Google para revalidar quando desejar.`,
       });
     }
 
     const data = await aboutRes.json() as any;
     const user = data.user || {};
+    const realEmail = user.emailAddress || currentEmail;
+    const realName = user.displayName || currentName;
 
     const updated = db.updateDriveSettings({
       connected: true,
-      account_email: 'cast.servicostecnicos@gmail.com',
-      account_name: 'CAST Serviços Técnicos',
+      account_email: realEmail,
+      account_name: realName,
       account_photo: user.photoLink || driveSettings.account_photo,
     });
 
     return res.json({
       status: 'ok',
       connected: true,
-      account_email: 'cast.servicostecnicos@gmail.com',
-      account_name: 'CAST Serviços Técnicos',
+      account_email: realEmail,
+      account_name: realName,
       account_photo: updated.account_photo,
       storageQuota: data.storageQuota,
-      message: `Conexão com Google Drive verificada com sucesso para cast.servicostecnicos@gmail.com!`,
+      message: `Conexão com Google Drive verificada com sucesso para ${realEmail}!`,
     });
   } catch (err: any) {
+    const driveSettings = db.getDriveSettings();
     return res.status(500).json({
       status: 'error',
       connected: true,
-      account_email: 'cast.servicostecnicos@gmail.com',
+      account_email: driveSettings.account_email || 'Conta da Empresa',
       error: err.message || 'Falha ao testar conexão com Google Drive.',
     });
+  }
+});
+
+// ==========================================
+// CLOUDFLARE R2 OBJECT STORAGE ENDPOINTS
+// ==========================================
+
+// Obter configurações ativas do Cloudflare R2
+apiRouter.get('/r2/settings', requireAuth, (req, res) => {
+  const config = getEffectiveR2Config();
+  const maskedSecret = config.secret_access_key
+    ? `••••••••••••${config.secret_access_key.slice(-4)}`
+    : '';
+
+  res.json({
+    status: 'ok',
+    settings: {
+      ...config,
+      secret_access_key: maskedSecret,
+      has_secret: Boolean(config.secret_access_key),
+      is_configured: isR2Configured(config),
+    },
+  });
+});
+
+// Salvar configurações do Cloudflare R2
+apiRouter.post('/r2/settings', requireAuth, requireRole('admin', 'company'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const {
+      enabled,
+      account_id,
+      access_key_id,
+      secret_access_key,
+      bucket_name,
+      public_domain,
+      auto_upload_on_add,
+    } = req.body;
+
+    const current = db.getR2Settings();
+    const newSecret = secret_access_key && !secret_access_key.startsWith('••••')
+      ? String(secret_access_key).trim()
+      : current.secret_access_key;
+
+    const updated = db.updateR2Settings({
+      enabled: enabled !== undefined ? Boolean(enabled) : current.enabled,
+      account_id: account_id !== undefined ? String(account_id).trim() : current.account_id,
+      access_key_id: access_key_id !== undefined ? String(access_key_id).trim() : current.access_key_id,
+      secret_access_key: newSecret,
+      bucket_name: bucket_name !== undefined ? String(bucket_name).trim() : current.bucket_name,
+      public_domain: public_domain !== undefined ? String(public_domain).trim() : current.public_domain,
+      auto_upload_on_add: auto_upload_on_add !== undefined ? Boolean(auto_upload_on_add) : current.auto_upload_on_add,
+    });
+
+    let testResult: any = null;
+    if (updated.enabled && isR2Configured(updated)) {
+      testResult = await testR2Connection(updated);
+      db.updateR2Settings({
+        last_tested_at: new Date().toISOString(),
+        last_test_status: testResult.success ? 'success' : 'error',
+        last_test_message: testResult.message,
+      });
+    }
+
+    const finalSettings = db.getR2Settings();
+    res.json({
+      status: 'ok',
+      settings: {
+        ...finalSettings,
+        secret_access_key: finalSettings.secret_access_key
+          ? `••••••••••••${finalSettings.secret_access_key.slice(-4)}`
+          : '',
+        is_configured: isR2Configured(finalSettings),
+      },
+      testResult,
+    });
+  } catch (err: any) {
+    console.error('Error saving R2 settings:', err);
+    res.status(500).json({ error: err.message || 'Erro ao salvar configurações do Cloudflare R2.' });
+  }
+});
+
+// Testar conexão com o Cloudflare R2
+apiRouter.post('/r2/test', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { account_id, access_key_id, secret_access_key, bucket_name } = req.body || {};
+    const current = db.getR2Settings();
+
+    const testConfig: Partial<R2Settings> = {
+      account_id: account_id || current.account_id,
+      access_key_id: access_key_id || current.access_key_id,
+      secret_access_key: (secret_access_key && !secret_access_key.startsWith('••••'))
+        ? String(secret_access_key).trim()
+        : current.secret_access_key,
+      bucket_name: bucket_name || current.bucket_name,
+    };
+
+    const result = await testR2Connection(testConfig);
+    db.updateR2Settings({
+      last_tested_at: new Date().toISOString(),
+      last_test_status: result.success ? 'success' : 'error',
+      last_test_message: result.message,
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err.message || 'Falha ao testar conexão.' });
+  }
+});
+
+// Sincronizar mídias locais existentes para o Cloudflare R2
+apiRouter.post('/r2/sync-local-media', requireAuth, requireRole('admin', 'company'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const r2Config = getEffectiveR2Config();
+    if (!isR2Configured(r2Config)) {
+      return res.status(400).json({ error: 'Configure as chaves do Cloudflare R2 antes de sincronizar.' });
+    }
+
+    const data = db.getData();
+    const mediaList = data.media || [];
+    let syncedCount = 0;
+    const errors: string[] = [];
+
+    for (const m of mediaList) {
+      if (m.type === 'weather_clock' || m.type === 'rss') continue;
+      if (m.file_url && (m.file_url.includes('r2.cloudflarestorage.com') || (r2Config.public_domain && m.file_url.includes(r2Config.public_domain)))) {
+        continue;
+      }
+
+      let localFileName = '';
+      if (m.file_url && m.file_url.startsWith('/uploads/')) {
+        localFileName = path.basename(m.file_url);
+      } else if (m.file_url && !m.file_url.startsWith('http')) {
+        localFileName = path.basename(m.file_url);
+      }
+
+      if (localFileName) {
+        const localFilePath = path.join(uploadsDir, localFileName);
+        if (fs.existsSync(localFilePath)) {
+          try {
+            const buffer = fs.readFileSync(localFilePath);
+            const isVideo = m.type === 'video' || localFileName.endsWith('.mp4');
+            const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
+            const r2Res = await uploadToR2({
+              buffer,
+              key: localFileName,
+              contentType: mimeType,
+            });
+            m.file_url = r2Res.publicUrl;
+            m.updated_at = new Date().toISOString();
+            syncedCount++;
+          } catch (uploadErr: any) {
+            errors.push(`${m.name}: ${uploadErr.message}`);
+          }
+        }
+      }
+    }
+
+    if (syncedCount > 0) {
+      db.persist();
+    }
+
+    res.json({
+      status: 'ok',
+      syncedCount,
+      errorsCount: errors.length,
+      errors: errors.slice(0, 5),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Erro ao sincronizar mídias com o R2.' });
   }
 });
 
@@ -5075,9 +5313,22 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       }
     }
 
-    // Always use localUrl (/uploads/...) as primary file_url so both videos (HTTP Range) and images play reliably,
-    // with automatic cloud/Drive recovery in server.ts if local cache is ever cleared on deploy.
-    const targetUrl = localUrl;
+    // Se o Cloudflare R2 estiver configurado, salvar a mídia diretamente no R2 com CDN global permanente
+    let targetUrl = localUrl;
+    const r2Config = getEffectiveR2Config();
+    if (r2Config.enabled && isR2Configured(r2Config)) {
+      try {
+        const r2Res = await uploadToR2({
+          buffer,
+          key: uniqueLocalName,
+          contentType: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
+        });
+        targetUrl = r2Res.publicUrl;
+        console.log('[Cloudflare R2] Mídia da empresa salva no R2 com sucesso:', targetUrl);
+      } catch (r2Err: any) {
+        console.warn('[Cloudflare R2] Falha ao enviar mídia da empresa para R2:', r2Err.message);
+      }
+    }
 
     const now = new Date().toISOString();
     const newMedia: Media = {

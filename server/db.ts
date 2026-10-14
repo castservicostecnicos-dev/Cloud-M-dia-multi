@@ -8,6 +8,7 @@ import {
   getFirestoreSyncStatus,
   enableFirestoreSync,
 } from './firestore.js';
+import { R2Settings } from '../src/types';
 
 export interface User {
   id: string;
@@ -453,6 +454,7 @@ export interface DatabaseSchema {
   sub_clients: SubClient[];
   drive_documents: DriveDocument[];
   drive_settings: DriveSettings;
+  r2_settings?: R2Settings;
   proof_of_play_logs?: ProofOfPlayLog[];
   sessions?: AuthSession[];
 }
@@ -678,6 +680,18 @@ class DatabaseStore {
           };
           changed = true;
         }
+        if (!this.data.r2_settings) {
+          this.data.r2_settings = {
+            enabled: Boolean(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID),
+            account_id: process.env.R2_ACCOUNT_ID || '',
+            access_key_id: process.env.R2_ACCESS_KEY_ID || '',
+            secret_access_key: process.env.R2_SECRET_ACCESS_KEY || '',
+            bucket_name: process.env.R2_BUCKET_NAME || '',
+            public_domain: process.env.R2_PUBLIC_DOMAIN || '',
+            auto_upload_on_add: true,
+          };
+          changed = true;
+        }
         if (!this.data.sessions) {
           this.data.sessions = [];
           changed = true;
@@ -685,6 +699,17 @@ class DatabaseStore {
         if (!this.data.proof_of_play_logs) {
           this.data.proof_of_play_logs = [];
           changed = true;
+        } else if (Array.isArray(this.data.proof_of_play_logs)) {
+          const seenPopIds = new Set<string>();
+          const originalLen = this.data.proof_of_play_logs.length;
+          this.data.proof_of_play_logs = this.data.proof_of_play_logs.filter((l) => {
+            if (!l || !l.id || seenPopIds.has(l.id)) return false;
+            seenPopIds.add(l.id);
+            return true;
+          });
+          if (this.data.proof_of_play_logs.length !== originalLen) {
+            changed = true;
+          }
         }
 
         // Ensure all players have a unique persistent access_token for direct URL auto-start
@@ -800,7 +825,8 @@ class DatabaseStore {
           sub_clients: this.mergeById(cloudData.sub_clients, localData.sub_clients),
           drive_documents: this.mergeById(cloudData.drive_documents, localData.drive_documents),
           drive_settings: mergedDriveSettings,
-          proof_of_play_logs: [...(cloudData.proof_of_play_logs || []), ...(localData.proof_of_play_logs || [])].slice(-2000),
+          r2_settings: cloudData.r2_settings || localData.r2_settings || this.data.r2_settings,
+          proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs, localData.proof_of_play_logs).slice(-5000),
           sessions: Array.from(sessionMap.values()).slice(-200),
         };
 
@@ -1185,6 +1211,15 @@ class DatabaseStore {
         connected: false,
         root_folder_name: 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
       },
+      r2_settings: {
+        enabled: Boolean(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID),
+        account_id: process.env.R2_ACCOUNT_ID || '',
+        access_key_id: process.env.R2_ACCESS_KEY_ID || '',
+        secret_access_key: process.env.R2_SECRET_ACCESS_KEY || '',
+        bucket_name: process.env.R2_BUCKET_NAME || '',
+        public_domain: process.env.R2_PUBLIC_DOMAIN || '',
+        auto_upload_on_add: true,
+      },
       proof_of_play_logs: [],
       sessions: [],
     };
@@ -1481,21 +1516,51 @@ class DatabaseStore {
       }
     }
 
-    // Sempre manter conta padrão cast.servicostecnicos@gmail.com ativa e vinculada
+    const targetEmail = cleanUpdates.account_email || current.account_email || 'cast.servicostecnicos@gmail.com';
+    const targetName = cleanUpdates.account_name || current.account_name || 'Conta da Empresa';
+
     cleanUpdates.connected = true;
-    cleanUpdates.account_email = 'cast.servicostecnicos@gmail.com';
-    cleanUpdates.account_name = cleanUpdates.account_name || current.account_name || 'CAST Serviços Técnicos';
+    cleanUpdates.account_email = targetEmail;
+    cleanUpdates.account_name = targetName;
 
     this.data.drive_settings = {
       ...current,
       ...cleanUpdates,
       connected: true,
-      account_email: 'cast.servicostecnicos@gmail.com',
-      account_name: cleanUpdates.account_name || 'CAST Serviços Técnicos',
+      account_email: targetEmail,
+      account_name: targetName,
       last_synced_at: new Date().toISOString(),
     };
     this.save();
     return this.data.drive_settings;
+  }
+
+  // ==========================================
+  // CLOUDFLARE R2 OBJECT STORAGE SETTINGS
+  // ==========================================
+  public getR2Settings(): R2Settings {
+    if (!this.data.r2_settings) {
+      this.data.r2_settings = {
+        enabled: Boolean(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID),
+        account_id: process.env.R2_ACCOUNT_ID || '',
+        access_key_id: process.env.R2_ACCESS_KEY_ID || '',
+        secret_access_key: process.env.R2_SECRET_ACCESS_KEY || '',
+        bucket_name: process.env.R2_BUCKET_NAME || '',
+        public_domain: process.env.R2_PUBLIC_DOMAIN || '',
+        auto_upload_on_add: true,
+      };
+    }
+    return this.data.r2_settings;
+  }
+
+  public updateR2Settings(settings: Partial<R2Settings>): R2Settings {
+    const current = this.getR2Settings();
+    this.data.r2_settings = {
+      ...current,
+      ...settings,
+    };
+    this.save();
+    return this.data.r2_settings;
   }
 
   // ==========================================
