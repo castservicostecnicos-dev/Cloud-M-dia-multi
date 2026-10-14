@@ -220,14 +220,6 @@ export default function App() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-slate-400">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-      </div>
-    );
-  }
-
   // DIRECT PLAYER VIEW VIA UNIQUE URL (?token=TOKEN or ?player=CODE)
   const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
   const urlPlayerParam = searchParams?.get('player') || searchParams?.get('playerCode') || null;
@@ -243,6 +235,14 @@ export default function App() {
             window.location.search = '';
           }}
         />
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-slate-400">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
       </div>
     );
   }

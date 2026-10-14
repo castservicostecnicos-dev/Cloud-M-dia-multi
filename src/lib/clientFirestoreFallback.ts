@@ -1,5 +1,6 @@
 import { initializeApp, getApps } from 'firebase/app';
-import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore/lite';
+import initialSnapshot from './initialDataSnapshot.json';
 
 const COLLECTION_NAME = 'app_data';
 const DOCUMENT_ID = 'indoor_media_cloudflare_db';
@@ -31,51 +32,7 @@ function getClientFirestore() {
   return getFirestore(app, PRIMARY_FIRESTORE_CONFIG.firestoreDatabaseId);
 }
 
-const DEFAULT_DB = {
-  plans: [
-    { id: 'plan-1', name: '1 Player + 1 Operador', max_players: 1, max_operators: 1 },
-    { id: 'plan-2', name: '2 Players + 1 Operador', max_players: 2, max_operators: 1 },
-    { id: 'plan-3', name: '2 Players + 2 Operadores', max_players: 2, max_operators: 2 },
-    { id: 'plan-4', name: '3 Players + 2 Operadores', max_players: 3, max_operators: 2 },
-    { id: 'plan-5', name: '4 Players + 2 Operadores', max_players: 4, max_operators: 2 },
-    { id: 'plan-6', name: '1 Player Sem Operador', max_players: 1, max_operators: 0 },
-  ],
-  users: [
-    {
-      id: 'usr-admin-1',
-      name: 'Administrador Geral',
-      email: 'ale11062@gmail.com',
-      password_hash: 'admin',
-      salt: 'admin',
-      role: 'admin',
-      active: true,
-      must_change_password: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-  ],
-  companies: [] as any[],
-  stores: [] as any[],
-  players: [] as any[],
-  operators: [] as any[],
-  playlists: [] as any[],
-  media: [] as any[],
-  rss_feeds: [] as any[],
-  call_phrases: [] as any[],
-  player_calls: [] as any[],
-  sessions: [] as any[],
-  drive_documents: [] as any[],
-  sub_clients: [] as any[],
-  drive_settings: {
-    connected: true,
-    account_email: 'cast.servicostecnicos@gmail.com',
-    account_name: 'CAST Serviços Técnicos',
-    root_folder_name: 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
-    root_folder_id: '19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
-    root_folder_url: 'https://drive.google.com/drive/folders/19aGanFfBfZABMIEwh8DDQt6zW0c0ISl1',
-    auto_sync: true,
-  } as any,
-};
+const DEFAULT_DB = initialSnapshot as any;
 
 let cachedDb: any = null;
 let lastLoadedAt = 0;
@@ -90,14 +47,50 @@ function normalizeDbShape(parsed: any) {
   };
 }
 
+async function fetchFirestoreDocumentViaRest(): Promise<any | null> {
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${PRIMARY_FIRESTORE_CONFIG.projectId}/databases/${PRIMARY_FIRESTORE_CONFIG.firestoreDatabaseId}/documents/${COLLECTION_NAME}/${DOCUMENT_ID}?key=${PRIMARY_FIRESTORE_CONFIG.apiKey}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const rawData = json?.fields?.data?.stringValue;
+    if (rawData) {
+      return JSON.parse(rawData);
+    }
+  } catch (e) {
+    console.warn('[ClientFallback] Direct REST fetch error:', e);
+  }
+  return null;
+}
+
 async function loadCloudDb(forceRefresh = false): Promise<any> {
   if (cachedDb && (cachedDb.companies?.length || 0) > 0 && !forceRefresh && Date.now() - lastLoadedAt < 5000) {
     return cachedDb;
   }
+
+  // 1. Check local cache first if in-memory cachedDb is not populated
+  if (!cachedDb) {
+    try {
+      const localRaw = localStorage.getItem(LOCAL_DB_CACHE_KEY);
+      if (localRaw) {
+        const parsedLocal = JSON.parse(localRaw);
+        if ((parsedLocal?.companies?.length || 0) > 0) {
+          cachedDb = normalizeDbShape(parsedLocal);
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Load from Firestore Lite with strict 4s timeout (pure HTTP REST, zero WebSocket hanging)
   try {
     const fs = getClientFirestore();
-    const snap = await getDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID));
-    if (snap.exists()) {
+    const snap = await Promise.race([
+      getDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID)),
+      new Promise<null>((_, reject) =>
+        setTimeout(() => reject(new Error('Firestore read timeout after 4s')), 4000)
+      ),
+    ]);
+    if (snap && snap.exists()) {
       const raw = snap.data();
       if (raw && typeof raw.data === 'string') {
         const parsed = JSON.parse(raw.data);
@@ -112,21 +105,27 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
       }
     }
   } catch (err) {
-    console.warn('[ClientFallback] Error reading Firestore:', err);
-  }
-
-  try {
-    const localRaw = localStorage.getItem(LOCAL_DB_CACHE_KEY);
-    if (localRaw) {
-      const parsedLocal = JSON.parse(localRaw);
-      if ((parsedLocal?.companies?.length || 0) > 0) {
-        cachedDb = normalizeDbShape(parsedLocal);
+    console.warn('[ClientFallback] Firestore Lite getDoc notice:', err);
+    // 3. Fallback to direct REST HTTP fetch
+    try {
+      const restData = await fetchFirestoreDocumentViaRest();
+      if (restData) {
+        cachedDb = normalizeDbShape(restData);
+        lastLoadedAt = Date.now();
+        try {
+          if ((cachedDb.companies?.length || 0) > 0) {
+            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(cachedDb));
+          }
+        } catch {}
         return cachedDb;
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
-  cachedDb = normalizeDbShape(JSON.parse(JSON.stringify(DEFAULT_DB)));
+  if (!cachedDb || !cachedDb.companies || cachedDb.companies.length === 0) {
+    cachedDb = normalizeDbShape(JSON.parse(JSON.stringify(DEFAULT_DB)));
+  }
+
   return cachedDb;
 }
 
@@ -184,6 +183,23 @@ function getCurrentUserFromToken(dbData: any, token: string | null) {
       }
     }
   } catch {}
+
+  // Check if token belongs directly to a player (code or access_token)
+  const player = (dbData.players || []).find(
+    (p: any) => p.access_token === token || String(p.code || '').toLowerCase() === String(token || '').toLowerCase()
+  );
+  if (player) {
+    const u = (dbData.users || []).find((usr: any) => usr.id === player.user_id) || {
+      id: `usr-pl-${player.id}`,
+      name: player.name,
+      email: `${player.code}@player.local`,
+      role: 'player',
+      company_id: player.company_id,
+      must_change_password: false,
+    };
+    return { user: u, playerId: player.id };
+  }
+
   return null;
 }
 
@@ -209,7 +225,7 @@ export async function handleClientFallbackRequest(
           (p.access_token === effectiveToken || String(p.code || '').toLowerCase() === pCode) &&
           p.status === 'active'
       );
-      if (!player) throw new Error('Código ou Token de Player inválido ou inativo.');
+      if (!player) throw new Error('Código ou Token de Player não encontrado ou inativo.');
       const company = (dbData.companies || []).find((c: any) => c.id === player.company_id);
       const playerUser = (dbData.users || []).find((u: any) => u.id === player.user_id) || {
         id: `usr-pl-${player.id}`,
@@ -235,7 +251,8 @@ export async function handleClientFallbackRequest(
           created_at: Date.now(),
         },
       ];
-      await saveCloudDb(dbData);
+      // Save in background without blocking response
+      saveCloudDb(dbData).catch((err) => console.warn('[ClientFallback] Background save error:', err));
       return {
         token: newToken,
         user: playerUser,
@@ -292,7 +309,8 @@ export async function handleClientFallbackRequest(
         created_at: Date.now(),
       },
     ];
-    await saveCloudDb(dbData);
+    // Save in background without blocking login
+    saveCloudDb(dbData).catch((err) => console.warn('[ClientFallback] Background save error:', err));
 
     const companyData = user.company_id ? (dbData.companies || []).find((c: any) => c.id === user.company_id) : null;
     const player = user.role === 'player' ? (dbData.players || []).find((p: any) => p.user_id === user.id) : null;
@@ -305,7 +323,7 @@ export async function handleClientFallbackRequest(
         email: user.email,
         role: user.role,
         company_id: user.company_id,
-        must_change_password: !!user.must_change_password,
+        must_change_password: user.role === 'admin' ? false : !!user.must_change_password,
       },
       company: companyData ? { id: companyData.id, name: companyData.trade_name } : null,
       player: player || null,
@@ -326,7 +344,7 @@ export async function handleClientFallbackRequest(
         email: user.email,
         role: user.role,
         company_id: user.company_id,
-        must_change_password: !!user.must_change_password,
+        must_change_password: user.role === 'admin' ? false : !!user.must_change_password,
       },
       company: company ? { id: company.id, name: company.trade_name } : null,
       player: player || null,

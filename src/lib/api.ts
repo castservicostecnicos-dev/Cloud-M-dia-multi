@@ -4,9 +4,21 @@ import { handleClientFallbackRequest } from './clientFirestoreFallback';
 const TOKEN_KEY = 'indoor_media_token';
 
 // Support decoupled Static Site deployment pointing to a remote backend service
+// Support decoupled Static Site deployment pointing to a remote backend service
 export const API_BASE_URL: string = (
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api'
 );
+
+// Detect static JAMstack deployments (e.g. Cloudflare Pages *.pages.dev) where no Node.js backend exists
+const isExplicitStaticHost =
+  typeof window !== 'undefined' &&
+  !import.meta.env.VITE_API_BASE_URL &&
+  (window.location.hostname.endsWith('.pages.dev') ||
+   window.location.hostname.includes('cloudflare') ||
+   window.location.hostname.endsWith('.web.app') ||
+   window.location.hostname.endsWith('.firebaseapp.com'));
+
+let isDecoupledStaticMode = isExplicitStaticHost;
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -45,48 +57,54 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
   } catch {}
 
+  // If in static JAMstack mode (e.g. Cloudflare Pages with no Node.js backend), route directly to client Firestore fallback
+  if (isDecoupledStaticMode) {
+    return (await handleClientFallbackRequest(endpoint, options, token)) as T;
+  }
+
   let response: Response | null = null;
   let contentType = '';
   let data: any = null;
   let parseFailed = false;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        ...options,
-        headers,
-      });
-      contentType = (response.headers.get('content-type') || '').toLowerCase();
-      parseFailed = false;
-      try {
-        data = await response.json();
-      } catch {
-        parseFailed = true;
-        data = {};
-      }
+  try {
+    response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers,
+    });
+    contentType = (response.headers.get('content-type') || '').toLowerCase();
 
-      if (!parseFailed && !contentType.includes('text/html')) {
-        break;
-      }
+    // If server returned HTML (e.g. index.html SPA rewrite because /api route does not exist on Cloudflare Pages)
+    if (contentType.includes('text/html')) {
+      isDecoupledStaticMode = true;
+      return (await handleClientFallbackRequest(endpoint, options, token)) as T;
+    }
+
+    try {
+      data = await response.json();
     } catch {
       parseFailed = true;
+      data = {};
     }
-
-    if (attempt === 0) {
-      await new Promise((r) => setTimeout(r, 700));
-    }
+  } catch {
+    parseFailed = true;
   }
 
-  if (response && !response.ok && !parseFailed && !contentType.includes('text/html')) {
+  if (response && !response.ok && !parseFailed) {
     if (response.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
       throw new Error(data?.error || 'Sua sessão expirou. Por favor, faça login novamente para continuar.');
     }
+    // If 404 on API endpoint, host is static, route to fallback
+    if (response.status === 404) {
+      isDecoupledStaticMode = true;
+      return (await handleClientFallbackRequest(endpoint, options, token)) as T;
+    }
     throw new Error(data?.error || data?.message || `Erro no servidor (${response.status}): Falha ao processar a requisição.`);
   }
 
-  if (!response || parseFailed || contentType.includes('text/html')) {
-    // Fallback to direct Firebase Firestore client handler (supports Static Site deploys or cold-start windows)
+  if (!response || parseFailed) {
+    isDecoupledStaticMode = true;
     return (await handleClientFallbackRequest(endpoint, options, token)) as T;
   }
 

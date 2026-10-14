@@ -121,26 +121,7 @@ export default defineConfig(() => {
                 rangeRequests: true,
               },
             },
-            // 4. Player & Session APIs - NetworkFirst with cache fallback
-            {
-              urlPattern: ({ url }) =>
-                url.pathname.startsWith('/api/player/') ||
-                url.pathname === '/api/auth/me',
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'indoor-api-cache-v1',
-                networkTimeoutSeconds: 4,
-                expiration: {
-                  maxEntries: 50,
-                  maxAgeSeconds: 60 * 60 * 24 * 14, // 14 days
-                  purgeOnQuotaError: true,
-                },
-                cacheableResponse: {
-                  statuses: [0, 200],
-                },
-              },
-            },
-            // 5. External Media / CDNs / Unsplash
+            // 4. External Media / CDNs / Unsplash
             {
               urlPattern: /^https:\/\/(?:images\.unsplash\.com|cdn\.|assets\.).*/i,
               handler: 'CacheFirst',
