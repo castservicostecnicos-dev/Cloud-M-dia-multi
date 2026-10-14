@@ -2188,8 +2188,54 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
       const fullBuffer = fs.readFileSync(filePath);
       saveMediaBinaryToFirestore(uniqueName, mimeType || 'application/octet-stream', fullBuffer).catch(() => {});
 
+      const isVideo =
+        detectedExt === 'mp4' ||
+        detectedExt === 'webm' ||
+        detectedExt === 'mov' ||
+        detectedExt === 'ogv' ||
+        (mimeType && mimeType.startsWith('video/'));
+
       let finalUrl = `/uploads/${uniqueName}`;
       let r2Url: string | undefined = undefined;
+      let driveFileId: string | undefined = undefined;
+      let driveViewUrl: string | undefined = undefined;
+
+      // Google Drive como Bucket de Fotos para imagens
+      if (!isVideo) {
+        try {
+          const driveToken = await getValidDriveServerToken();
+          if (driveToken) {
+            const driveSettings = db.getDriveSettings();
+            const rootFolder = await serverGetOrCreateFolder(
+              driveToken,
+              driveSettings.root_folder_name || 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA'
+            );
+            const photosFolder = await serverGetOrCreateFolder(
+              driveToken,
+              driveSettings.photos_bucket_folder_name || '📸 Fotos com Código Único',
+              rootFolder.id
+            );
+            const uniqueCode = `FOTO-${Date.now().toString(36).toUpperCase()}`;
+            const sanitizedFileName = `${uniqueCode}_${(filename || 'foto').replace(/\s+/g, '_')}`;
+            const driveUpload = await serverUploadFileToDrive(
+              driveToken,
+              fullBuffer,
+              sanitizedFileName,
+              mimeType || 'image/jpeg',
+              photosFolder.id,
+              uniqueCode,
+              `Foto no Bucket Google Drive (${uniqueCode})`
+            );
+            driveFileId = driveUpload.id;
+            driveViewUrl = driveUpload.webViewLink;
+            finalUrl = `/api/drive/stream/${driveUpload.id}`;
+            console.log('[Google Drive Photo Bucket] Foto enviada com sucesso no chunked upload:', driveFileId);
+          }
+        } catch (driveErr: any) {
+          console.warn('[Google Drive Photo Bucket] Falha ao enviar para o Drive:', driveErr.message);
+        }
+      }
+
       const r2Config = getEffectiveR2Config();
       if (r2Config.enabled && isR2Configured(r2Config)) {
         try {
@@ -2211,6 +2257,8 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
         url: finalUrl,
         localUrl: `/uploads/${uniqueName}`,
         r2Url,
+        driveFileId,
+        driveViewUrl,
         filename: uniqueName,
         size: fullBuffer.length,
       });
@@ -2286,6 +2334,45 @@ apiRouter.post('/upload', requireAuth, async (req: AuthenticatedRequest, res) =>
 
     let finalUrl = `/uploads/${uniqueName}`;
     let r2Url: string | undefined = undefined;
+    let driveFileId: string | undefined = undefined;
+    let driveViewUrl: string | undefined = undefined;
+
+    // Google Drive como Bucket de Fotos para imagens
+    if (!isVideo) {
+      try {
+        const driveToken = await getValidDriveServerToken();
+        if (driveToken) {
+          const driveSettings = db.getDriveSettings();
+          const rootFolder = await serverGetOrCreateFolder(
+            driveToken,
+            driveSettings.root_folder_name || 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA'
+          );
+          const photosFolder = await serverGetOrCreateFolder(
+            driveToken,
+            driveSettings.photos_bucket_folder_name || '📸 Fotos com Código Único',
+            rootFolder.id
+          );
+          const uniqueCode = `FOTO-${Date.now().toString(36).toUpperCase()}`;
+          const sanitizedFileName = `${uniqueCode}_${(filename || 'foto').replace(/\s+/g, '_')}`;
+          const driveUpload = await serverUploadFileToDrive(
+            driveToken,
+            buffer,
+            sanitizedFileName,
+            mimeType || 'image/jpeg',
+            photosFolder.id,
+            uniqueCode,
+            `Foto no Bucket Google Drive (${uniqueCode})`
+          );
+          driveFileId = driveUpload.id;
+          driveViewUrl = driveUpload.webViewLink;
+          finalUrl = `/api/drive/stream/${driveUpload.id}`;
+          console.log('[Google Drive Photo Bucket] Foto enviada com sucesso no direct upload:', driveFileId);
+        }
+      } catch (driveErr: any) {
+        console.warn('[Google Drive Photo Bucket] Falha ao enviar para o Drive:', driveErr.message);
+      }
+    }
+
     const r2Config = getEffectiveR2Config();
     if (r2Config.enabled && isR2Configured(r2Config)) {
       try {
@@ -2306,6 +2393,8 @@ apiRouter.post('/upload', requireAuth, async (req: AuthenticatedRequest, res) =>
       url: finalUrl,
       localUrl: `/uploads/${uniqueName}`,
       r2Url,
+      driveFileId,
+      driveViewUrl,
       filename: uniqueName,
       originalName: filename,
       size: buffer.length,
@@ -5313,8 +5402,14 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       }
     }
 
-    // Se o Cloudflare R2 estiver configurado, salvar a mídia diretamente no R2 com CDN global permanente
+    // Se for foto e foi salva no Google Drive, o Google Drive atua como Bucket oficial de fotos
     let targetUrl = localUrl;
+    if (isPhoto && mediaSavedToDrive && driveUploadInfo?.id) {
+      targetUrl = `/api/drive/stream/${driveUploadInfo.id}`;
+      console.log('[Google Drive Photo Bucket] Foto vinculada ao bucket do Google Drive:', driveUploadInfo.id);
+    }
+
+    // Se o Cloudflare R2 estiver configurado, salvar a mídia diretamente no R2 com CDN global permanente
     const r2Config = getEffectiveR2Config();
     if (r2Config.enabled && isR2Configured(r2Config)) {
       try {

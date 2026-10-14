@@ -462,8 +462,8 @@ export const GoogleDriveFileManager: React.FC<GoogleDriveFileManagerProps> = ({
       // Update Drive Settings with root folder info
       const settingsUpdate = {
         connected: true,
-        account_email: 'cast.servicostecnicos@gmail.com',
-        account_name: 'CAST Serviços Técnicos',
+        account_email: driveSettings.account_email,
+        account_name: driveSettings.account_name,
         root_folder_url: rootFolderUrl,
         last_synced_at: new Date().toISOString(),
       };
@@ -483,7 +483,7 @@ export const GoogleDriveFileManager: React.FC<GoogleDriveFileManagerProps> = ({
       } else {
         showToast(
           'success',
-          `Pastas organizadas no Google Drive (cast.servicostecnicos@gmail.com) com sucesso!`
+          `Pastas organizadas no Google Drive (${driveSettings.account_email || 'Conta da Empresa'}) com sucesso!`
         );
       }
       loadData();

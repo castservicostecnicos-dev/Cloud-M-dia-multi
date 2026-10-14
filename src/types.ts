@@ -331,6 +331,9 @@ export interface DriveSettings {
   root_folder_id?: string;
   root_folder_name?: string;
   root_folder_url?: string;
+  photos_bucket_folder_id?: string;
+  photos_bucket_folder_name?: string;
+  photos_bucket_enabled?: boolean;
   last_synced_at?: string;
   access_token?: string;
   refresh_token?: string;

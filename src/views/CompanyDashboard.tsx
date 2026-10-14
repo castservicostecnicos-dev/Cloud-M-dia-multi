@@ -3065,9 +3065,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   </span>
                 </div>
                 <div className="h-8 w-px bg-slate-700 mx-1" />
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-700/80 text-emerald-400 text-[11px] font-semibold">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Nuvem Ativa
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-950/80 border border-blue-700/80 text-blue-300 text-[11px] font-semibold" title="Google Drive configurado como bucket oficial de fotos da empresa">
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  Bucket de Fotos: Google Drive
                 </span>
               </div>
             </div>
@@ -5273,6 +5273,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                           </button>
                         </div>
                       </div>
+
+                      {!selectedDeviceFile.isVideo && (
+                        <div className="flex items-start gap-2.5 rounded-lg bg-blue-950/50 border border-blue-500/30 p-2.5 text-xs text-blue-200">
+                          <Folder className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-bold text-white">Bucket de Fotos: Google Drive</p>
+                            <p className="text-[11px] text-blue-300">
+                              Esta foto será salva e catalogada no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-blue-200">📸 Fotos com Código Único</code>) com link permanente para as TVs.
+                            </p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
