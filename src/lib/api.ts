@@ -78,7 +78,11 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   }
 
   if (response && !response.ok && !parseFailed && !contentType.includes('text/html')) {
-    throw new Error(data?.error || 'Ocorreu um erro ao processar a requisição.');
+    if (response.status === 401) {
+      localStorage.removeItem(TOKEN_KEY);
+      throw new Error(data?.error || 'Sua sessão expirou. Por favor, faça login novamente para continuar.');
+    }
+    throw new Error(data?.error || data?.message || `Erro no servidor (${response.status}): Falha ao processar a requisição.`);
   }
 
   if (!response || parseFailed || contentType.includes('text/html')) {
