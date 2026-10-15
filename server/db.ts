@@ -565,8 +565,21 @@ export function hashPassword(password: string, existingSalt?: string): { hash: s
 }
 
 export function verifyPassword(password: string, hash: string, salt: string): boolean {
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(derived, 'hex'), Buffer.from(hash, 'hex'));
+  if (!password || !hash) return false;
+  // Direct match for legacy / plain-text passwords
+  if (password === hash) return true;
+  if (!salt) return false;
+  try {
+    const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+    const bufA = Buffer.from(derived, 'hex');
+    const bufB = Buffer.from(hash, 'hex');
+    if (bufA.length !== bufB.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
 }
 
 export const dataDir = process.env.DATA_DIR

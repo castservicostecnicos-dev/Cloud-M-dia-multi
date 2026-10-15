@@ -140,13 +140,35 @@ async function saveCloudDb(dbData: any): Promise<void> {
   dbData.stores = dbData.company_stores;
   cachedDb = dbData;
   lastLoadedAt = Date.now();
+  // Safe localStorage save
   try {
     localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(dbData));
-  } catch {}
+  } catch {
+    try {
+      const lightweight = {
+        ...dbData,
+        media: (dbData.media || []).map((m: any) => ({
+          ...m,
+          file_url: m.file_url && m.file_url.length > 5000 && m.file_url.startsWith('data:') ? `/uploads/${m.id}.bin` : m.file_url,
+        })),
+      };
+      localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(lightweight));
+    } catch {}
+  }
 
   try {
     const fs = getClientFirestore();
-    const serialized = JSON.stringify(dbData);
+    let serialized = JSON.stringify(dbData);
+    if (serialized.length > 900000) {
+      const lightweight = {
+        ...dbData,
+        media: (dbData.media || []).map((m: any) => ({
+          ...m,
+          file_url: m.file_url && m.file_url.length > 5000 && m.file_url.startsWith('data:') ? `/uploads/${m.id}.bin` : m.file_url,
+        })),
+      };
+      serialized = JSON.stringify(lightweight);
+    }
     await setDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID), {
       version: 1,
       updated_at: new Date().toISOString(),
@@ -524,12 +546,18 @@ export async function handleClientFallbackRequest(
     const compOps = (dbData.operators || []).filter((o: any) => o.company_id === activeCompanyId);
     const compPlaylists = (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId);
     const compMedia = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
+    const maxMedia =
+      comp?.max_media !== undefined && comp.max_media !== null
+        ? Number(comp.max_media)
+        : (plan?.max_media || plan?.max_storage || 250);
     return {
       company: comp,
       plan_name: plan?.name || 'Plano Corporativo',
       limits: {
         max_players: comp?.custom_max_players ?? plan?.max_players ?? 10,
         max_operators: comp?.custom_max_operators ?? plan?.max_operators ?? 10,
+        max_media: maxMedia,
+        max_storage: maxMedia,
       },
       counts: {
         players: compPlayers.length,
@@ -739,8 +767,73 @@ export async function handleClientFallbackRequest(
       ...body,
     };
     dbData.media = [newMedia, ...(dbData.media || [])];
+
+    if (body.addToAllPlaylists) {
+      const nowStr = new Date().toISOString();
+      const itemDuration = Number(body.duration) || newMedia.duration || 10;
+      dbData.playlists = (dbData.playlists || []).map((pl: any) => {
+        if (pl.company_id !== activeCompanyId) return pl;
+        return {
+          ...pl,
+          updated_at: nowStr,
+          items: [
+            ...(pl.items || []),
+            {
+              id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              playlist_id: pl.id,
+              media_id: newMedia.id,
+              position: (pl.items?.length || 0) + 1,
+              duration: itemDuration,
+              name: newMedia.name,
+              type: newMedia.type,
+              file_url: newMedia.file_url,
+              created_at: nowStr,
+            },
+          ],
+        };
+      });
+    }
+
     await saveCloudDb(dbData);
     return newMedia;
+  }
+
+  if (pathOnly.startsWith('/company/media/') && pathOnly.endsWith('/add-to-all-playlists') && method === 'POST') {
+    const medId = pathOnly.split('/')[3];
+    const targetMedia = (dbData.media || []).find((m: any) => m.id === medId && m.company_id === activeCompanyId);
+    if (!targetMedia) throw new Error('Mídia não encontrada.');
+    const { duration, forceDuplicate } = body;
+    const itemDuration = Number(duration) || targetMedia.duration || 10;
+    let updatedCount = 0;
+    const nowStr = new Date().toISOString();
+    dbData.playlists = (dbData.playlists || []).map((pl: any) => {
+      if (pl.company_id !== activeCompanyId) return pl;
+      const alreadyHas = !forceDuplicate && (pl.items || []).some((it: any) => it.media_id === medId);
+      if (alreadyHas) return pl;
+      const newItems = [
+        ...(pl.items || []),
+        {
+          id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          playlist_id: pl.id,
+          media_id: medId,
+          position: (pl.items?.length || 0) + 1,
+          duration: itemDuration,
+          name: targetMedia.name,
+          type: targetMedia.type,
+          file_url: targetMedia.file_url,
+          created_at: nowStr,
+        },
+      ];
+      updatedCount++;
+      return { ...pl, items: newItems, updated_at: nowStr };
+    });
+    await saveCloudDb(dbData);
+    return {
+      message: `Mídia incluída em ${updatedCount} playlist(s)!`,
+      updatedCount,
+      totalPlaylists: (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId).length,
+      playlists: (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId),
+    };
   }
 
   if (pathOnly.startsWith('/company/media/') && method === 'DELETE') {
@@ -1418,8 +1511,8 @@ export async function handleClientFallbackRequest(
   }
 
   if (pathOnly === '/company/media/upload-to-drive' && method === 'POST') {
-    const { uploadedFilename, fileData, filename, mimeType, name, duration, companyId } = body;
-    const win = window as any;
+    const { uploadedFilename, fileData, filename, mimeType, name, duration, companyId, addToAllPlaylists } = body;
+    const win = (typeof window !== 'undefined' ? window : globalThis) as any;
     const resolvedDataUrl =
       (uploadedFilename && win.__chunkUploads?.[uploadedFilename]) ||
       fileData ||
@@ -1436,6 +1529,33 @@ export async function handleClientFallbackRequest(
       created_at: new Date().toISOString(),
     };
     dbData.media = [newMedia, ...(dbData.media || [])];
+
+    if (addToAllPlaylists) {
+      const nowStr = new Date().toISOString();
+      const itemDuration = Number(duration) || newMedia.duration || 10;
+      dbData.playlists = (dbData.playlists || []).map((pl: any) => {
+        if (pl.company_id !== (companyId || activeCompanyId)) return pl;
+        return {
+          ...pl,
+          updated_at: nowStr,
+          items: [
+            ...(pl.items || []),
+            {
+              id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              playlist_id: pl.id,
+              media_id: newMedia.id,
+              position: (pl.items?.length || 0) + 1,
+              duration: itemDuration,
+              name: newMedia.name,
+              type: newMedia.type,
+              file_url: newMedia.file_url,
+              created_at: nowStr,
+            },
+          ],
+        };
+      });
+    }
+
     await saveCloudDb(dbData);
     return {
       status: 'ok',

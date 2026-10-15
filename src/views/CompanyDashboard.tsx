@@ -90,6 +90,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [rssList, setRssList] = useState<RssFeed[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const effectiveMaxMedia = stats?.limits?.max_media || stats?.limits?.max_storage || stats?.company?.max_media || 250;
+
   // Modals
   const [storeModalOpen, setStoreModalOpen] = useState(false);
   const [editingStore, setEditingStore] = useState<CompanyStore | null>(null);
@@ -483,6 +485,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setPlaylists(Array.isArray(py) ? py : []);
       setMediaList(Array.isArray(md) ? md : []);
       setRssList(Array.isArray(rs) ? rs : []);
+
+      if (editingPlaylist && Array.isArray(py)) {
+        const freshEditing = py.find((p) => p.id === editingPlaylist.id);
+        if (freshEditing) {
+          setEditingPlaylist(freshEditing);
+        }
+      }
 
       // Load cached integrity status if any
       api.getMediaIntegrityStatus().then((rep) => {
@@ -1047,39 +1056,67 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   };
 
   const handleSelectMediaForPlaylist = (media: Media) => {
+    const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
+    const newItem = {
+      id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      media_id: media.id,
+      duration: itemDuration,
+      name: media.name,
+      type: media.type,
+      file_url: media.file_url,
+    };
     setPlaylistForm((prev) => ({
       ...prev,
       items: [
         ...prev.items,
-        {
-          media_id: media.id,
-          duration: media.duration || (media.type === 'rss' ? 15 : 10),
-        },
+        newItem,
       ],
     }));
-    showToast('success', `Mídia "${media.name}" incluída na playlist.`);
+    showToast('success', `Mídia "${media.name}" adicionada à playlist. Lembre-se de salvar a playlist para confirmar.`);
     setMediaPickerModalOpen(false);
   };
 
   const handleSelectMediaForPlaylistAndRestart = async (media: Media) => {
+    const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
+    const newItem = {
+      id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      media_id: media.id,
+      duration: itemDuration,
+      name: media.name,
+      type: media.type,
+      file_url: media.file_url,
+    };
+    const updatedFormItems = [...playlistForm.items, newItem];
     setPlaylistForm((prev) => ({
       ...prev,
-      items: [
-        ...prev.items,
-        {
-          media_id: media.id,
-          duration: media.duration || (media.type === 'rss' ? 15 : 10),
-        },
-      ],
+      items: updatedFormItems,
     }));
     setMediaPickerModalOpen(false);
-    showToast('success', `Mídia "${media.name}" incluída na playlist! Enviando comando de reinicialização...`);
+
     if (editingPlaylist) {
-      await handleRestartPlayers({
-        playlistId: editingPlaylist.id,
-        playlistName: editingPlaylist.name,
-      });
+      try {
+        const payload = {
+          ...editingPlaylist,
+          ...playlistForm,
+          items: updatedFormItems.map((it, idx) => ({
+            ...it,
+            position: idx + 1,
+            duration: Number(it.duration) || 10,
+          })),
+          restartPlayers: true,
+        };
+        const updatedPl = await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
+        if (updatedPl) {
+          setEditingPlaylist(updatedPl);
+          setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
+        }
+        showToast('success', `Mídia "${media.name}" salva na playlist "${editingPlaylist.name}" e reprodutores reiniciados!`);
+        loadData();
+      } catch (err: any) {
+        showToast('error', `Falha ao salvar playlist: ${err.message}`);
+      }
     } else {
+      showToast('success', `Mídia "${media.name}" incluída na playlist!`);
       await handleRestartPlayers({});
     }
   };
@@ -1268,7 +1305,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     e.preventDefault();
 
     const currentMediaCount = mediaList.length;
-    const maxMediaLimit = stats?.limits?.max_media || stats?.limits?.max_storage || 20;
+    const maxMediaLimit = effectiveMaxMedia;
     if (currentMediaCount >= maxMediaLimit) {
       showToast(
         'error',
@@ -1348,6 +1385,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           duration: Number(mediaForm.duration) || 10,
           addToAllPlaylists: isTargetAllPlaylists,
         });
+        if (createdMedia) {
+          setMediaList((prev) => [createdMedia!, ...prev.filter((m) => m.id !== createdMedia!.id)]);
+        }
       }
 
       // Se foi solicitado incluir em todas as playlists da empresa:
@@ -1370,23 +1410,46 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         if (createdMedia && targetPl) {
           const itemDuration = Number(createdMedia.duration) || (createdMedia.type === 'rss' ? 15 : 10);
           const nowStr = new Date().toISOString();
-          const updatedItems = [
-            ...(targetPl.items || []).map((it, idx) => ({
-              ...it,
-              position: idx + 1,
-            })),
-            {
-              id: `pli-${Date.now()}`,
-              playlist_id: targetPl.id,
-              media_id: createdMedia.id,
-              position: (targetPl.items?.length || 0) + 1,
-              duration: itemDuration,
-              name: createdMedia.name,
-              type: createdMedia.type,
-              file_url: createdMedia.file_url,
-              created_at: nowStr,
-            },
-          ];
+
+          // Preserva todos os itens atuais que estão no formulário aberto para evitar perder itens recém-adicionados
+          const baseItems = (playlistModalOpen && editingPlaylist?.id === targetPl.id && playlistForm.items.length > 0)
+            ? playlistForm.items.map((it, idx) => {
+                const foundMedia = mediaList.find((m) => m.id === it.media_id);
+                return {
+                  id: it.id || `pli-${Date.now()}-${idx}`,
+                  playlist_id: targetPl!.id,
+                  media_id: it.media_id,
+                  position: idx + 1,
+                  duration: Number(it.duration) || 10,
+                  name: foundMedia?.name || it.name,
+                  type: foundMedia?.type || it.type,
+                  file_url: foundMedia?.file_url || it.file_url,
+                  schedule_enabled: Boolean(it.schedule_enabled),
+                  schedule_days: it.schedule_days,
+                  schedule_start_time: it.schedule_start_time,
+                  schedule_end_time: it.schedule_end_time,
+                  schedule_start_date: it.schedule_start_date,
+                  schedule_end_date: it.schedule_end_date,
+                  volume: it.volume !== undefined ? Number(it.volume) : 100,
+                  is_muted: Boolean(it.is_muted),
+                  created_at: it.created_at || nowStr,
+                };
+              })
+            : (targetPl.items || []).map((it, idx) => ({ ...it, position: idx + 1 }));
+
+          const newItem = {
+            id: `pli-${Date.now()}`,
+            playlist_id: targetPl.id,
+            media_id: createdMedia.id,
+            position: baseItems.length + 1,
+            duration: itemDuration,
+            name: createdMedia.name,
+            type: createdMedia.type,
+            file_url: createdMedia.file_url,
+            created_at: nowStr,
+          };
+
+          const updatedItems = [...baseItems, newItem];
 
           // Atualizar no formulário se estiver aberto
           if (playlistModalOpen && editingPlaylist?.id === targetPl.id) {
@@ -1395,20 +1458,28 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               items: [
                 ...prev.items,
                 {
+                  id: newItem.id,
                   media_id: createdMedia!.id,
                   duration: itemDuration,
+                  name: createdMedia!.name,
+                  type: createdMedia!.type,
+                  file_url: createdMedia!.file_url,
                 },
               ],
             }));
+            setEditingPlaylist((prev) => (prev ? { ...prev, items: updatedItems } : null));
           }
 
           // Salvar a playlist atualizada no servidor
           try {
-            await api.updateCompanyPlaylist(targetPl.id, {
+            const savedPl = await api.updateCompanyPlaylist(targetPl.id, {
               ...targetPl,
               items: updatedItems,
               restartPlayers: andRestart,
             });
+            if (savedPl) {
+              setPlaylists((prev) => prev.map((p) => (p.id === targetPl!.id ? savedPl : p)));
+            }
           } catch (plErr) {
             console.warn('Falha ao adicionar mídia diretamente à playlist:', plErr);
           }
@@ -1433,7 +1504,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       );
 
       setMediaModalOpen(false);
-      resetMediaModalState();
+      resetMediaModalState(playlistModalOpen && editingPlaylist ? editingPlaylist.id : undefined);
       loadData();
     } catch (err: any) {
       showToast('error', err.message || 'Erro ao cadastrar mídia.');
@@ -3061,7 +3132,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider block">Mídias Utilizadas</span>
                   <span className="text-sm font-bold text-white">
-                    {mediaList.length} <span className="text-xs text-slate-400 font-normal">/ {stats?.limits?.max_media || stats?.limits?.max_storage || 20}</span>
+                    {mediaList.length} <span className="text-xs text-slate-400 font-normal">/ {effectiveMaxMedia}</span>
                   </span>
                 </div>
                 <div className="h-8 w-px bg-slate-700 mx-1" />
@@ -3077,25 +3148,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               <div className="h-2 w-full rounded-full bg-slate-900 border border-slate-700/60 overflow-hidden">
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${
-                    mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20)
+                    mediaList.length >= effectiveMaxMedia
                       ? 'bg-rose-500'
-                      : mediaList.length / (stats?.limits?.max_media || stats?.limits?.max_storage || 20) >= 0.8
+                      : mediaList.length / effectiveMaxMedia >= 0.8
                       ? 'bg-amber-500'
                       : 'bg-emerald-500'
                   }`}
                   style={{
                     width: `${Math.min(
                       100,
-                      (mediaList.length / (stats?.limits?.max_media || stats?.limits?.max_storage || 20)) * 100
+                      (mediaList.length / effectiveMaxMedia) * 100
                     )}%`,
                   }}
                 />
               </div>
               <div className="flex items-center justify-between mt-1 text-[10px]">
                 <span className="text-slate-400">
-                  {Math.max(0, (stats?.limits?.max_media || stats?.limits?.max_storage || 20) - mediaList.length)} vaga(s) disponível(is)
+                  {Math.max(0, effectiveMaxMedia - mediaList.length)} vaga(s) disponível(is)
                 </span>
-                {mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20) && (
+                {mediaList.length >= effectiveMaxMedia && (
                   <span className="font-bold text-rose-400">
                     Limite de mídias atingido!
                   </span>
@@ -4941,7 +5012,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      resetMediaModalState();
+                      resetMediaModalState(editingPlaylist?.id);
                       setMediaModalOpen(true);
                     }}
                     className="mt-4 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
@@ -5691,10 +5762,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               <div className="shrink-0 p-4 border-t border-slate-800 bg-slate-900/95 flex flex-col sm:flex-row items-center justify-between gap-3">
                 <div className="text-xs text-slate-400">
                   <span>Cota: </span>
-                  <strong className={mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20) ? 'text-rose-400 font-bold' : 'text-slate-200 font-semibold'}>
-                    {mediaList.length} / {stats?.limits?.max_media || stats?.limits?.max_storage || 20} mídias
+                  <strong className={mediaList.length >= effectiveMaxMedia ? 'text-rose-400 font-bold' : 'text-slate-200 font-semibold'}>
+                    {mediaList.length} / {effectiveMaxMedia} mídias
                   </strong>
-                  {mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20) && (
+                  {mediaList.length >= effectiveMaxMedia && (
                     <span className="text-rose-400 ml-1.5 font-semibold text-[11px]">(Limite atingido)</span>
                   )}
                 </div>
@@ -5712,10 +5783,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     type="button"
                     disabled={
                       isUploadingMedia ||
-                      mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20) ||
-                      (mediaSourceType !== 'device' && !mediaForm.name.trim()) ||
+                      mediaList.length >= effectiveMaxMedia ||
                       (mediaSourceType === 'device' && !selectedDeviceFile && !mediaForm.file_url) ||
-                      (mediaSourceType === 'url' && !mediaForm.file_url.trim())
+                      (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
+                      (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
                     }
                     onClick={(e) => handleSaveMedia(e, true)}
                     className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
@@ -5743,10 +5814,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     type="submit"
                     disabled={
                       isUploadingMedia ||
-                      mediaList.length >= (stats?.limits?.max_media || stats?.limits?.max_storage || 20) ||
-                      (mediaSourceType !== 'device' && !mediaForm.name.trim()) ||
+                      mediaList.length >= effectiveMaxMedia ||
                       (mediaSourceType === 'device' && !selectedDeviceFile && !mediaForm.file_url) ||
-                      (mediaSourceType === 'url' && !mediaForm.file_url.trim())
+                      (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
+                      (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
                     }
                     className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-xs font-semibold text-white hover:bg-blue-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
                   >
