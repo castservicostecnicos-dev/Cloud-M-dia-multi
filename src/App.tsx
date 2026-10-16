@@ -59,6 +59,7 @@ export default function App() {
     }
 
     // Try to load cached session immediately for instant offline start
+    let hasLoadedFromCache = false;
     try {
       const cached = localStorage.getItem('indoor_cached_session');
       if (cached) {
@@ -67,14 +68,22 @@ export default function App() {
           setUser(parsed.user);
           setCompanyInfo(parsed.company);
           setCurrentPlayer(parsed.player);
+          setLoading(false);
+          hasLoadedFromCache = true;
         }
       }
     } catch (e) {
       console.warn('Failed to parse cached session:', e);
     }
 
+    // Safety timeout: never leave user stuck on loading screen for more than 2 seconds
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 2000);
+
     api.getMe()
       .then((res) => {
+        clearTimeout(safetyTimer);
         setUser(res.user);
         setCompanyInfo(res.company);
         setCurrentPlayer(res.player);
@@ -83,19 +92,25 @@ export default function App() {
         } catch (e) {}
       })
       .catch((err: any) => {
+        clearTimeout(safetyTimer);
         // If offline or network error, maintain cached session so player continues functioning
-        if (!navigator.onLine || err?.message?.includes('Failed to fetch') || err?.message?.includes('NetworkError')) {
+        if (!navigator.onLine || err?.message?.includes('Failed to fetch') || err?.message?.includes('NetworkError') || err?.name === 'AbortError') {
           console.warn('Dispositivo em modo offline; mantendo sessão em cache local.');
           return;
         }
         // Only invalidate if the server responded with authentication rejection
-        setStoredToken(null);
-        localStorage.removeItem('indoor_cached_session');
-        setUser(null);
+        if (!hasLoadedFromCache) {
+          setStoredToken(null);
+          localStorage.removeItem('indoor_cached_session');
+          setUser(null);
+        }
       })
       .finally(() => {
+        clearTimeout(safetyTimer);
         setLoading(false);
       });
+
+    return () => clearTimeout(safetyTimer);
   }, []);
 
   const handleLoginSuccess = (data: { user: User; company?: { id: string; name: string }; player?: Player }) => {
@@ -241,8 +256,23 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-slate-400">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+      <div className="flex flex-col h-screen w-screen items-center justify-center bg-slate-900 text-slate-400 gap-3 p-4 text-center">
+        <div className="h-9 w-9 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+        <p className="text-xs text-slate-400 font-medium">Carregando Mídia Indoor...</p>
+        <button
+          type="button"
+          onClick={() => {
+            setLoading(false);
+            setStoredToken(null);
+            try {
+              localStorage.removeItem('indoor_cached_session');
+            } catch {}
+            setUser(null);
+          }}
+          className="mt-2 text-xs text-blue-400 hover:text-blue-300 underline cursor-pointer"
+        >
+          Demorando para responder? Ir para o início
+        </button>
       </div>
     );
   }

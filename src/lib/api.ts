@@ -67,11 +67,18 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   let data: any = null;
   let parseFailed = false;
 
+  const isFileUpload = endpoint.includes('/upload');
+  const timeoutMs = isFileUpload ? 60000 : 5000;
+  const controller = new AbortController();
+  const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     response = await fetch(`${API_BASE_URL}${endpoint}`, {
       ...options,
       headers,
+      signal: options.signal || controller.signal,
     });
+    clearTimeout(timeoutTimer);
     contentType = (response.headers.get('content-type') || '').toLowerCase();
 
     // If server returned HTML (e.g. index.html SPA rewrite because /api route does not exist on Cloudflare Pages)
@@ -87,6 +94,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       data = {};
     }
   } catch {
+    clearTimeout(timeoutTimer);
     parseFailed = true;
   }
 
