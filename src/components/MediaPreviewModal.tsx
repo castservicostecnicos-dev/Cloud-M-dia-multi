@@ -15,11 +15,12 @@ import {
   Check,
   Plus,
   Radio,
+  HardDrive,
 } from 'lucide-react';
 import { Media } from '../types';
 import { WeatherClockMedia } from './WeatherClockMedia';
 import { RssNewsMedia } from './RssNewsMedia';
-import { resolveMediaDisplayUrl } from '../lib/googleDrive';
+import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
 
 interface MediaPreviewModalProps {
   media: Media | null;
@@ -41,6 +42,8 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState<number>(0);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [imageError, setImageError] = useState(false);
+  const [videoError, setVideoError] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const formatSeconds = (sec: number) => {
@@ -85,12 +88,32 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             >
               {badge.label}
             </span>
+            {Boolean(media.drive_file_id || media.drive_view_url || media.source === 'drive') && (
+              <span className="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold uppercase bg-blue-950/80 border border-blue-700 text-blue-300 flex items-center gap-1 shadow-xs">
+                <HardDrive className="h-3 w-3 text-blue-400" />
+                Google Drive
+              </span>
+            )}
             <h3 className="text-sm sm:text-base font-bold text-white truncate" title={media.name}>
               {media.name}
             </h3>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {(media.drive_view_url || media.drive_file_id || extractDriveFileId(media.file_url)) && (
+              <a
+                href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : `https://drive.google.com/file/d/${extractDriveFileId(media.file_url)}/view`)}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 font-bold px-3 py-1.5 rounded-lg shadow-sm transition"
+                title="Abrir arquivo diretamente no Google Drive"
+              >
+                <HardDrive className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Ver no Google Drive</span>
+                <span className="sm:hidden">Drive</span>
+                <ExternalLink className="h-3 w-3 opacity-80" />
+              </a>
+            )}
             {media.file_url && !media.file_url.startsWith('widget:') && (
               <a
                 href={media.file_url}
@@ -119,39 +142,102 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           {/* VIDEO PLAYER */}
           {media.type === 'video' && (
             <div className="w-full h-full flex flex-col items-center justify-center bg-black relative">
-              <video
-                ref={videoRef}
-                src={resolveMediaDisplayUrl(media.file_url)}
-                autoPlay
-                controls
-                playsInline
-                className="w-full h-full max-h-[64vh] object-contain"
-                onLoadedMetadata={(e) => {
-                  const target = e.target as HTMLVideoElement;
-                  setVideoDuration(Math.round(target.duration));
-                }}
-                onTimeUpdate={(e) => {
-                  setVideoCurrentTime(Math.round((e.target as HTMLVideoElement).currentTime));
-                }}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-              />
+              {!videoError ? (
+                <video
+                  ref={videoRef}
+                  src={resolveMediaDisplayUrl(media.file_url)}
+                  autoPlay
+                  controls
+                  playsInline
+                  className="w-full h-full max-h-[64vh] object-contain"
+                  onLoadedMetadata={(e) => {
+                    const target = e.target as HTMLVideoElement;
+                    setVideoDuration(Math.round(target.duration));
+                  }}
+                  onTimeUpdate={(e) => {
+                    setVideoCurrentTime(Math.round((e.target as HTMLVideoElement).currentTime));
+                  }}
+                  onPlay={() => setIsPlaying(true)}
+                  onError={(e) => {
+                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
+                    const target = e.currentTarget;
+                    if (driveId && !(target.src || '').includes('uc?export=download')) {
+                      target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                    } else if ((media as any).local_url && target.src !== (media as any).local_url) {
+                      target.src = (media as any).local_url;
+                    } else {
+                      setVideoError(true);
+                    }
+                  }}
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400 max-w-md">
+                  <Film className="h-12 w-12 text-blue-400 mb-3" />
+                  <p className="text-sm font-semibold text-white mb-1">Vídeo armazenado no Google Drive</p>
+                  <p className="text-xs text-slate-400 mb-4">
+                    Abra o vídeo diretamente no Google Drive para reproduzir com alta velocidade e qualidade total.
+                  </p>
+                  <a
+                    href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
+                  >
+                    <HardDrive className="h-4 w-4" />
+                    <span>Reproduzir no Google Drive</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+              )}
             </div>
           )}
 
           {/* IMAGE VIEWER */}
           {media.type === 'image' && (
             <div className="w-full h-full flex items-center justify-center p-2 bg-radial from-slate-950 to-black overflow-auto">
-              <img
-                src={resolveMediaDisplayUrl(media.file_url)}
-                alt={media.name}
-                referrerPolicy="no-referrer"
-                onLoad={(e) => {
-                  const img = e.currentTarget;
-                  setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
-                }}
-                className="max-w-full max-h-[64vh] object-contain rounded-lg shadow-xl"
-              />
+              {!imageError ? (
+                <img
+                  src={resolveMediaDisplayUrl(media.file_url)}
+                  alt={media.name}
+                  referrerPolicy="no-referrer"
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+                  }}
+                  onError={(e) => {
+                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
+                    const target = e.currentTarget;
+                    if (driveId && !(target.src || '').includes('thumbnail')) {
+                      target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+                    } else if (driveId && !(target.src || '').includes('uc?id=')) {
+                      target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
+                    } else if ((media as any).local_url && target.src !== (media as any).local_url) {
+                      target.src = (media as any).local_url;
+                    } else {
+                      setImageError(true);
+                    }
+                  }}
+                  className="max-w-full max-h-[64vh] object-contain rounded-lg shadow-xl"
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400 max-w-md">
+                  <ImageIcon className="h-12 w-12 text-blue-400 mb-3" />
+                  <p className="text-sm font-semibold text-white mb-1">Imagem armazenada no Google Drive</p>
+                  <p className="text-xs text-slate-400 mb-4">
+                    Abra a imagem diretamente na nuvem do Google Drive para visualização em alta definição.
+                  </p>
+                  <a
+                    href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
+                  >
+                    <HardDrive className="h-4 w-4" />
+                    <span>Visualizar no Google Drive</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+              )}
             </div>
           )}
 

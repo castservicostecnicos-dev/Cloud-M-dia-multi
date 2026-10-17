@@ -42,10 +42,29 @@ const STORAGE_EXPIRY_KEY = 'mindoors_drive_token_expiry';
 const STORAGE_EMAIL_KEY = 'mindoors_drive_account_email';
 const STORAGE_NAME_KEY = 'mindoors_drive_account_name';
 
-// Auto-hydrate access token and expiry from localStorage so session is permanently retained
+export const isRealOAuthToken = (token?: string | null): boolean => {
+  if (!token || typeof token !== 'string') return false;
+  const trimmed = token.trim();
+  if (
+    trimmed === 'cast-persistent-drive-session' ||
+    trimmed.startsWith('fake') ||
+    trimmed.length < 20
+  ) {
+    return false;
+  }
+  return true;
+};
+
+// Auto-hydrate access token and expiry from localStorage so session is retained if real
 let cachedAccessToken: string | null = (() => {
   try {
-    return localStorage.getItem(STORAGE_TOKEN_KEY) || localStorage.getItem('google_drive_access_token') || null;
+    const t = localStorage.getItem(STORAGE_TOKEN_KEY) || localStorage.getItem('google_drive_access_token') || null;
+    if (t && !isRealOAuthToken(t)) {
+      localStorage.removeItem(STORAGE_TOKEN_KEY);
+      localStorage.removeItem('google_drive_access_token');
+      return null;
+    }
+    return t;
   } catch {
     return null;
   }
@@ -54,15 +73,15 @@ let cachedAccessToken: string | null = (() => {
 let cachedTokenExpiry: number | null = (() => {
   try {
     const exp = localStorage.getItem(STORAGE_EXPIRY_KEY);
-    return exp ? Number(exp) : (cachedAccessToken ? Date.now() + 365 * 24 * 3600 * 1000 : null);
+    return exp ? Number(exp) : (cachedAccessToken && isRealOAuthToken(cachedAccessToken) ? Date.now() + 3600 * 1000 : null);
   } catch {
     return null;
   }
 })();
 
 export const setCachedAccessToken = (token: string | null, expiry?: number | null) => {
-  cachedAccessToken = token;
-  if (!token) {
+  if (!token || !isRealOAuthToken(token)) {
+    cachedAccessToken = null;
     cachedTokenExpiry = null;
     try {
       localStorage.removeItem(STORAGE_TOKEN_KEY);
@@ -70,22 +89,20 @@ export const setCachedAccessToken = (token: string | null, expiry?: number | nul
       localStorage.removeItem('google_drive_access_token');
     } catch {}
   } else {
-    // Definir expiração duradoura para que a conta carregue sempre sem necessidade de novo token
-    cachedTokenExpiry = expiry !== undefined && expiry !== null ? expiry : Date.now() + 365 * 24 * 3600 * 1000;
+    cachedAccessToken = token;
+    cachedTokenExpiry = expiry !== undefined && expiry !== null ? expiry : Date.now() + 3600 * 1000;
     try {
       localStorage.setItem(STORAGE_TOKEN_KEY, token);
       localStorage.setItem('google_drive_access_token', token);
       localStorage.setItem(STORAGE_EXPIRY_KEY, String(cachedTokenExpiry));
-      localStorage.setItem(STORAGE_EMAIL_KEY, 'cast.servicostecnicos@gmail.com');
-      localStorage.setItem(STORAGE_NAME_KEY, 'CAST Serviços Técnicos');
     } catch {}
   }
 };
 
 export const isTokenExpired = (): boolean => {
-  if (!cachedAccessToken) return false;
-  // Com a nova configuração persistente, não expirar abruptamente o token em memória
-  return false;
+  if (!cachedAccessToken || !isRealOAuthToken(cachedAccessToken)) return true;
+  if (!cachedTokenExpiry) return false;
+  return Date.now() >= cachedTokenExpiry;
 };
 
 export interface DriveAccountInfo {
@@ -128,28 +145,26 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
-  // Disparar imediatamente para garantir carregamento instantâneo da conta oficial
-  if (onAuthSuccess) {
-    const dummyUser: any = {
-      email: 'cast.servicostecnicos@gmail.com',
-      displayName: 'CAST Serviços Técnicos',
-      uid: 'cast-drive-user',
+  if (cachedAccessToken && isRealOAuthToken(cachedAccessToken) && !isTokenExpired()) {
+    const savedUser: any = {
+      email: localStorage.getItem(STORAGE_EMAIL_KEY) || 'cast.servicostecnicos@gmail.com',
+      displayName: localStorage.getItem(STORAGE_NAME_KEY) || 'Conta Conectada',
+      uid: 'gdrive-oauth-user',
     };
-    const t = cachedAccessToken || 'cast-persistent-drive-session';
     setTimeout(() => {
-      onAuthSuccess(dummyUser, t);
+      if (onAuthSuccess) onAuthSuccess(savedUser, cachedAccessToken!);
+    }, 20);
+  } else {
+    setTimeout(() => {
+      if (onAuthFailure) onAuthFailure();
     }, 20);
   }
 
   return onAuthStateChanged(auth, async (user: User | null) => {
-    if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        if (onAuthSuccess) {
-          onAuthSuccess(user, 'cast-persistent-drive-session');
-        }
-      }
+    if (user && cachedAccessToken && isRealOAuthToken(cachedAccessToken)) {
+      if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
+    } else if (!user && (!cachedAccessToken || !isRealOAuthToken(cachedAccessToken))) {
+      if (onAuthFailure) onAuthFailure();
     }
   });
 };
@@ -757,6 +772,21 @@ export const getDriveDirectStreamUrl = (fileId: string): string => {
 };
 
 /**
+ * Extracts Google Drive file ID from any URL format
+ */
+export const extractDriveFileId = (url: string | undefined | null): string | null => {
+  if (!url) return null;
+  const trimmed = url.trim();
+  const fileIdMatch =
+    trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+    trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/) ||
+    trimmed.match(/googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/) ||
+    trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/) ||
+    trimmed.match(/\/drive\/stream\/([a-zA-Z0-9_-]+)/);
+  return fileIdMatch && fileIdMatch[1] ? fileIdMatch[1] : null;
+};
+
+/**
  * Resolves any Google Drive web or view link to a direct streaming/image CDN URL.
  * Supports file/d/ID, open?id=ID, uc?id=ID, and passes other URLs intact.
  */
@@ -767,43 +797,23 @@ export const resolveMediaDisplayUrl = (url: string | undefined | null): string =
     return trimmed;
   }
 
+  const backendBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+  const origin = backendBase && backendBase.startsWith('http') ? backendBase.replace(/\/api\/?$/, '') : '';
+
   // Local uploads and backend stream proxy URLs
   if (trimmed.startsWith('/uploads/') || trimmed.startsWith('/api/drive/stream/')) {
-    const backendBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-    if (backendBase && backendBase.startsWith('http')) {
-      const origin = backendBase.replace(/\/api\/?$/, '');
-      return `${origin}${trimmed}`;
-    }
-    return trimmed;
+    return origin ? `${origin}${trimmed}` : trimmed;
   }
 
-  // Convert lh3 Google Direct links to direct CDN URL or backend proxy
-  if (trimmed.includes('lh3.googleusercontent.com/d/')) {
-    const fileIdMatch = trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (fileIdMatch && fileIdMatch[1]) {
-      const backendBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-      if (backendBase && backendBase.startsWith('http')) {
-        const origin = backendBase.replace(/\/api\/?$/, '');
-        return `${origin}/api/drive/stream/${fileIdMatch[1]}`;
-      }
-      return `https://drive.google.com/thumbnail?id=${fileIdMatch[1]}&sz=w1920`;
-    }
-    return trimmed;
-  }
-
-  // Google Drive standard links
-  if (trimmed.includes('drive.google.com') || trimmed.includes('docs.google.com')) {
-    const fileIdMatch =
-      trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
-      trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/) ||
-      trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (fileIdMatch && fileIdMatch[1]) {
-      const backendBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-      if (backendBase && backendBase.startsWith('http')) {
-        const origin = backendBase.replace(/\/api\/?$/, '');
-        return `${origin}/api/drive/stream/${fileIdMatch[1]}`;
-      }
-      return `https://drive.google.com/thumbnail?id=${fileIdMatch[1]}&sz=w1920`;
+  // Convert lh3 Google Direct links or Google Drive links to stream proxy
+  if (
+    trimmed.includes('lh3.googleusercontent.com') ||
+    trimmed.includes('drive.google.com') ||
+    trimmed.includes('docs.google.com')
+  ) {
+    const fileId = extractDriveFileId(trimmed);
+    if (fileId) {
+      return origin ? `${origin}/api/drive/stream/${fileId}` : `/api/drive/stream/${fileId}`;
     }
   }
 
@@ -909,22 +919,7 @@ export const deleteDriveFile = async (
   return true;
 };
 
-/**
- * Extracts Google Drive File ID from URL
- */
-export const extractDriveFileId = (url: string | undefined): string | null => {
-  if (!url) return null;
-  const lh3Match = url.match(/googleusercontent\.com\/d\/([a-zA-Z0-9_-]+)/);
-  if (lh3Match && lh3Match[1]) return lh3Match[1];
 
-  const driveFileMatch = url.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
-  if (driveFileMatch && driveFileMatch[1]) return driveFileMatch[1];
-
-  const idParamMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  if (idParamMatch && idParamMatch[1]) return idParamMatch[1];
-
-  return null;
-};
 
 /**
  * Checks a specific file in Google Drive to verify if it is active, trashed or missing

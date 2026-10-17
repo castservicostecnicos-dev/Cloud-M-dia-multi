@@ -4379,25 +4379,40 @@ async function getServiceAccountAccessToken(serviceAccountJsonStr: string): Prom
   }
 }
 
+function isRealOAuthToken(t?: string | null): boolean {
+  if (!t || typeof t !== 'string') return false;
+  const trimmed = t.trim();
+  if (
+    trimmed === 'cast-persistent-drive-session' ||
+    trimmed.startsWith('fake') ||
+    trimmed.length < 20
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Retrieve a valid Google Drive token for the server (supports Access Token, Refresh Token auto-renew, Service Account, and env vars)
  */
 async function getValidDriveServerToken(clientDriveToken?: string): Promise<string | null> {
   const driveSettings = db.getDriveSettings();
-  if (clientDriveToken) {
+  if (clientDriveToken && isRealOAuthToken(clientDriveToken)) {
     if (clientDriveToken !== driveSettings.access_token) {
       db.updateDriveSettings({
         access_token: clientDriveToken,
         connected: true,
-        account_email: 'cast.servicostecnicos@gmail.com',
-        account_name: 'CAST Serviços Técnicos',
+        account_email: driveSettings.account_email || 'cast.servicostecnicos@gmail.com',
+        account_name: driveSettings.account_name || 'Conta Conectada',
       });
     }
     return clientDriveToken;
   }
 
   const isTokenExpired = driveSettings.token_expiry ? Date.now() >= driveSettings.token_expiry : false;
-  let token = driveSettings.access_token || process.env.GOOGLE_DRIVE_ACCESS_TOKEN;
+  let token = (driveSettings.access_token && isRealOAuthToken(driveSettings.access_token))
+    ? driveSettings.access_token
+    : (process.env.GOOGLE_DRIVE_ACCESS_TOKEN && isRealOAuthToken(process.env.GOOGLE_DRIVE_ACCESS_TOKEN) ? process.env.GOOGLE_DRIVE_ACCESS_TOKEN : null);
 
   const refreshToken = driveSettings.refresh_token || process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
 
@@ -4997,44 +5012,107 @@ apiRouter.get('/drive/stream/:fileId', async (req, res) => {
   }
 
   try {
+    // 1. Locate any local cached file if available (for instant fallback)
+    const data = db.getData();
+    const doc = data.drive_documents?.find((d) => d.drive_file_id === fileId);
+    const mediaItem = data.media?.find((m) => m.drive_file_id === fileId || (m.file_url && m.file_url.includes(fileId)));
+    let localFilePath: string | null = null;
+
+    if (doc?.local_url && doc.local_url.startsWith('/uploads/')) {
+      const p = path.join(uploadsDir, path.basename(doc.local_url));
+      if (fs.existsSync(p)) localFilePath = p;
+    }
+    if (!localFilePath && mediaItem?.file_url && mediaItem.file_url.startsWith('/uploads/')) {
+      const p = path.join(uploadsDir, path.basename(mediaItem.file_url));
+      if (fs.existsSync(p)) localFilePath = p;
+    }
+    if (!localFilePath && (mediaItem as any)?.local_url && (mediaItem as any).local_url.startsWith('/uploads/')) {
+      const p = path.join(uploadsDir, path.basename((mediaItem as any).local_url));
+      if (fs.existsSync(p)) localFilePath = p;
+    }
+    if (!localFilePath && fs.existsSync(uploadsDir)) {
+      const found = fs.readdirSync(uploadsDir).find((f) => f.includes(fileId));
+      if (found) localFilePath = path.join(uploadsDir, found);
+    }
+
+    // 2. Try streaming from Google Drive with token if authenticated
     const token = await getValidDriveServerToken();
-    const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-
-    const headers: Record<string, string> = {};
     if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+      const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+      const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+      if (req.headers.range) {
+        headers['Range'] = String(req.headers.range);
+      }
+
+      const driveRes = await fetch(driveUrl, { headers });
+      if (driveRes.ok) {
+        res.status(driveRes.status);
+        const contentType = driveRes.headers.get('content-type') || 'application/octet-stream';
+        const contentLength = driveRes.headers.get('content-length');
+        const contentRange = driveRes.headers.get('content-range');
+        const acceptRanges = driveRes.headers.get('accept-ranges') || 'bytes';
+
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Accept-Ranges', acceptRanges);
+        res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+        if (contentLength) res.setHeader('Content-Length', contentLength);
+        if (contentRange) res.setHeader('Content-Range', contentRange);
+
+        if (driveRes.body) {
+          const { Readable } = await import('stream');
+          const nodeStream = Readable.fromWeb(driveRes.body as any);
+          return nodeStream.pipe(res);
+        } else {
+          return res.end();
+        }
+      }
     }
-    if (req.headers.range) {
-      headers['Range'] = String(req.headers.range);
+
+    // 3. If token streaming failed or no token, try Google Drive public download
+    try {
+      const pubUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+      const pubHeaders: Record<string, string> = {};
+      if (req.headers.range) pubHeaders['Range'] = String(req.headers.range);
+      const pubRes = await fetch(pubUrl, { headers: pubHeaders });
+      const pubType = pubRes.headers.get('content-type') || '';
+      if (pubRes.ok && !pubType.includes('text/html')) {
+        res.status(pubRes.status);
+        res.setHeader('Content-Type', pubType || 'application/octet-stream');
+        res.setHeader('Accept-Ranges', pubRes.headers.get('accept-ranges') || 'bytes');
+        if (pubRes.headers.get('content-length')) res.setHeader('Content-Length', pubRes.headers.get('content-length')!);
+        if (pubRes.headers.get('content-range')) res.setHeader('Content-Range', pubRes.headers.get('content-range')!);
+        if (pubRes.body) {
+          const { Readable } = await import('stream');
+          const nodeStream = Readable.fromWeb(pubRes.body as any);
+          return nodeStream.pipe(res);
+        }
+      }
+    } catch {}
+
+    // 4. Try Google thumbnail endpoint for images
+    try {
+      const thumbUrl = `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`;
+      const thumbRes = await fetch(thumbUrl);
+      const thumbType = thumbRes.headers.get('content-type') || '';
+      if (thumbRes.ok && thumbType.startsWith('image/')) {
+        res.status(200);
+        res.setHeader('Content-Type', thumbType);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        if (thumbRes.body) {
+          const { Readable } = await import('stream');
+          const nodeStream = Readable.fromWeb(thumbRes.body as any);
+          return nodeStream.pipe(res);
+        }
+      }
+    } catch {}
+
+    // 5. Fallback to local copy if available
+    if (localFilePath && fs.existsSync(localFilePath)) {
+      return res.sendFile(localFilePath);
     }
 
-    const driveRes = await fetch(driveUrl, { headers });
-
-    if (!driveRes.ok) {
-      // If fetching with token fails, redirect to direct lh3 stream
-      return res.redirect(302, `https://lh3.googleusercontent.com/d/${fileId}`);
-    }
-
-    res.status(driveRes.status);
-
-    const contentType = driveRes.headers.get('content-type') || 'application/octet-stream';
-    const contentLength = driveRes.headers.get('content-length');
-    const contentRange = driveRes.headers.get('content-range');
-    const acceptRanges = driveRes.headers.get('accept-ranges') || 'bytes';
-
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Accept-Ranges', acceptRanges);
-    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
-    if (contentLength) res.setHeader('Content-Length', contentLength);
-    if (contentRange) res.setHeader('Content-Range', contentRange);
-
-    if (driveRes.body) {
-      const { Readable } = await import('stream');
-      const nodeStream = Readable.fromWeb(driveRes.body as any);
-      nodeStream.pipe(res);
-    } else {
-      res.end();
-    }
+    // 6. Last resort redirect to lh3
+    return res.redirect(302, `https://lh3.googleusercontent.com/d/${fileId}`);
   } catch (err: any) {
     console.error(`[Drive Stream] Error streaming ${fileId}:`, err?.message);
     res.redirect(302, `https://lh3.googleusercontent.com/d/${fileId}`);
@@ -5402,11 +5480,11 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       }
     }
 
-    // Se for foto e foi salva no Google Drive, o Google Drive atua como Bucket oficial de fotos
+    // Se foi salva no Google Drive, vincula a URL ao streaming universal do Drive
     let targetUrl = localUrl;
-    if (isPhoto && mediaSavedToDrive && driveUploadInfo?.id) {
+    if (mediaSavedToDrive && driveUploadInfo?.id) {
       targetUrl = `/api/drive/stream/${driveUploadInfo.id}`;
-      console.log('[Google Drive Photo Bucket] Foto vinculada ao bucket do Google Drive:', driveUploadInfo.id);
+      console.log(`[Google Drive Storage] ${isPhoto ? 'Foto' : 'Vídeo'} vinculado ao Google Drive com sucesso:`, driveUploadInfo.id);
     }
 
     // Se o Cloudflare R2 estiver configurado, salvar a mídia diretamente no R2 com CDN global permanente
@@ -5442,6 +5520,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       source: mediaSavedToDrive ? 'drive' : 'device',
       file_size: buffer.length,
       mime_type: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
+      local_url: localUrl,
       created_at: now,
       updated_at: now,
     };

@@ -186,6 +186,7 @@ export interface Media {
   source?: 'drive' | 'device' | 'url' | 'rss' | 'weather_clock';
   file_size?: number;
   mime_type?: string;
+  local_url?: string;
   created_at: string;
   updated_at: string;
 }

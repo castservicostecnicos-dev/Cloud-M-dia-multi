@@ -706,12 +706,17 @@ export const api = {
     clientDriveToken?: string;
     addToAllPlaylists?: boolean;
   }) => {
-    const storedDriveToken =
+    const rawToken =
       data.clientDriveToken ||
       localStorage.getItem('mindoors_gdrive_access_token') ||
       localStorage.getItem('google_drive_access_token') ||
       sessionStorage.getItem('mindoors_gdrive_access_token') ||
       undefined;
+
+    const storedDriveToken =
+      rawToken && rawToken !== 'cast-persistent-drive-session' && rawToken.length >= 20
+        ? rawToken
+        : undefined;
 
     return request<{
       status: string;
@@ -779,11 +784,17 @@ export const api = {
       }
     }
 
-    const storedDriveToken =
+    const rawToken =
+      clientDriveToken ||
       localStorage.getItem('mindoors_gdrive_access_token') ||
       localStorage.getItem('google_drive_access_token') ||
       sessionStorage.getItem('mindoors_gdrive_access_token') ||
       undefined;
+
+    const storedDriveToken =
+      rawToken && rawToken !== 'cast-persistent-drive-session' && rawToken.length >= 20
+        ? rawToken
+        : undefined;
 
     const finalRes = await request<{
       status: string;

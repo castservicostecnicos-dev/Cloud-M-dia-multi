@@ -66,7 +66,7 @@ import { MediaThumbnail } from '../components/MediaThumbnail';
 import { MediaPreviewModal } from '../components/MediaPreviewModal';
 import { PlayerDiagnosticView, DiagnosticPlayerData } from '../components/PlayerDiagnosticView';
 import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
-import { resolveMediaDisplayUrl, getCachedToken, setCachedAccessToken } from '../lib/googleDrive';
+import { resolveMediaDisplayUrl, getCachedToken, setCachedAccessToken, initAuth, googleSignIn, setManualDriveToken, isRealOAuthToken } from '../lib/googleDrive';
 
 interface CompanyDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -181,6 +181,114 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [isSyncingDriveMedia, setIsSyncingDriveMedia] = useState(false);
   const [repairingMediaId, setRepairingMediaId] = useState<string | null>(null);
   const [showIntegrityDetails, setShowIntegrityDetails] = useState(false);
+
+  // Google Drive Connection State
+  const [driveConnected, setDriveConnected] = useState<boolean>(() => {
+    const t = getCachedToken();
+    return Boolean(t && isRealOAuthToken(t));
+  });
+  const [driveAccountEmail, setDriveAccountEmail] = useState<string>(() => {
+    return localStorage.getItem('mindoors_drive_account_email') || '';
+  });
+  const [isConnectingDrive, setIsConnectingDrive] = useState(false);
+  const [driveTokenModalOpen, setDriveTokenModalOpen] = useState(false);
+  const [manualDriveTokenInput, setManualDriveTokenInput] = useState('');
+  const [isSavingManualToken, setIsSavingManualToken] = useState(false);
+
+  useEffect(() => {
+    // 1. Fetch server drive settings on mount
+    api.getDriveSettings().then((res) => {
+      if (res?.settings) {
+        if (res.settings.connected) {
+          setDriveConnected(true);
+          if (res.settings.account_email) {
+            setDriveAccountEmail(res.settings.account_email);
+          }
+          if (res.settings.access_token && isRealOAuthToken(res.settings.access_token)) {
+            setCachedAccessToken(res.settings.access_token);
+          }
+        }
+      }
+    }).catch(() => {});
+
+    // 2. Listen for Google OAuth status
+    const unsubscribe = initAuth(
+      (user, token) => {
+        if (isRealOAuthToken(token)) {
+          setDriveConnected(true);
+          setDriveAccountEmail(user.email || 'cast.servicostecnicos@gmail.com');
+          setCachedAccessToken(token);
+        }
+      },
+      () => {
+        // Fallback: check if we have in-memory or stored token
+        const currentToken = getCachedToken();
+        if (currentToken && isRealOAuthToken(currentToken)) {
+          setDriveConnected(true);
+        }
+      }
+    );
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, []);
+
+  const handleConnectDrive = async () => {
+    try {
+      setIsConnectingDrive(true);
+      const res = await googleSignIn();
+      if (res && res.accessToken) {
+        setDriveConnected(true);
+        setDriveAccountEmail(res.user.email || 'Conta Conectada');
+        setCachedAccessToken(res.accessToken);
+        await api.updateDriveSettings({
+          connected: true,
+          access_token: res.accessToken,
+          account_email: res.user.email || undefined,
+          account_name: res.user.displayName || undefined,
+        }).catch(() => {});
+        showToast('success', `Google Drive conectado com sucesso: ${res.user.email || 'sua conta'}!`);
+      }
+    } catch (err: any) {
+      if (err?.code === 'auth/unauthorized-domain' || err?.message?.includes('unauthorized-domain')) {
+        setDriveTokenModalOpen(true);
+        showToast('info', 'Para autorizar este domínio, insira seu Token de Acesso do Google.');
+      } else if (err?.code !== 'auth/popup-closed-by-user' && !err?.message?.includes('popup-closed-by-user')) {
+        showToast('error', err.message || 'Falha ao conectar Google Drive.');
+      }
+    } finally {
+      setIsConnectingDrive(false);
+    }
+  };
+
+  const handleSaveManualDriveToken = async () => {
+    const clean = manualDriveTokenInput.trim();
+    if (!clean) {
+      showToast('error', 'Cole um token de acesso do Google válido.');
+      return;
+    }
+    try {
+      setIsSavingManualToken(true);
+      const res = await setManualDriveToken(clean);
+      if (res.accessToken) {
+        setDriveConnected(true);
+        setDriveAccountEmail(res.user.email || 'Conta Conectada');
+        setCachedAccessToken(res.accessToken);
+        await api.updateDriveSettings({
+          connected: true,
+          access_token: res.accessToken,
+          account_email: res.user.email || undefined,
+        }).catch(() => {});
+        showToast('success', `Google Drive conectado com sucesso: ${res.user.email || 'sua conta'}!`);
+        setDriveTokenModalOpen(false);
+        setManualDriveTokenInput('');
+      }
+    } catch (err: any) {
+      showToast('error', err.message || 'Token do Google inválido.');
+    } finally {
+      setIsSavingManualToken(false);
+    }
+  };
 
   // Quick RSS Selection Modal inside Playlist Builder
   const [rssQuickPickerOpen, setRssQuickPickerOpen] = useState(false);
@@ -1336,12 +1444,21 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           selectedDeviceFile.name;
 
         let uploadRes;
+        const currentToken =
+          getCachedToken() ||
+          (typeof localStorage !== 'undefined'
+            ? localStorage.getItem('mindoors_gdrive_access_token') ||
+              localStorage.getItem('google_drive_access_token')
+            : undefined) ||
+          undefined;
+
         if (selectedDeviceFile.file) {
           uploadRes = await api.uploadCompanyMediaFileChunked({
             file: selectedDeviceFile.file,
             name: mediaTitle,
             duration: Number(mediaForm.duration) || (selectedDeviceFile.isVideo ? 15 : 10),
             addToAllPlaylists: isTargetAllPlaylists,
+            clientDriveToken: currentToken,
             onProgress: (pct) => setUploadProgress(pct),
           });
         } else {
@@ -1352,12 +1469,19 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             name: mediaTitle,
             duration: Number(mediaForm.duration) || 10,
             addToAllPlaylists: isTargetAllPlaylists,
+            clientDriveToken: currentToken,
           });
         }
 
         if (uploadRes?.media) {
           createdMedia = uploadRes.media;
           setMediaList((prev) => [uploadRes.media, ...prev.filter((m) => m.id !== uploadRes.media.id)]);
+          if (uploadRes.savedToDrive) {
+            showToast(
+              'success',
+              `📸 Mídia salva e catalogada no Google Drive com sucesso (${uploadRes.media.unique_code || 'Drive'})!`
+            );
+          }
         }
       } else if (mediaSourceType === 'weather_clock') {
         targetFileUrl = 'widget:weather_clock';
@@ -3136,10 +3260,28 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   </span>
                 </div>
                 <div className="h-8 w-px bg-slate-700 mx-1" />
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-950/80 border border-blue-700/80 text-blue-300 text-[11px] font-semibold" title="Google Drive configurado como bucket oficial de fotos da empresa">
-                  <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />
-                  Bucket de Fotos: Google Drive
-                </span>
+                {driveConnected ? (
+                  <button
+                    type="button"
+                    onClick={handleConnectDrive}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
+                    title="Google Drive conectado para fotos e vídeos da empresa. Clique para alternar conta se desejar."
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Drive Conectado{driveAccountEmail ? ` (${driveAccountEmail.split('@')[0]})` : ''}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleConnectDrive}
+                    disabled={isConnectingDrive}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-950/80 border border-amber-600/80 text-amber-300 hover:bg-amber-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
+                    title="Clique para conectar sua conta do Google Drive para upload automático de mídias na nuvem"
+                  >
+                    <HardDrive className="h-3 w-3 text-amber-400" />
+                    <span>{isConnectingDrive ? 'Conectando...' : 'Conectar Google Drive'}</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -3388,16 +3530,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         {m.duration}s
                       </span>
 
-                      {m.drive_view_url && (
+                      {(m.drive_view_url || m.drive_file_id) && (
                         <a
-                          href={m.drive_view_url}
+                          href={m.drive_view_url || `https://drive.google.com/file/d/${m.drive_file_id}/view`}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-blue-400 hover:text-blue-300 p-1 rounded hover:bg-slate-700 transition cursor-pointer flex items-center gap-1 text-[11px]"
-                          title="Abrir arquivo original na nuvem"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-950/80 border border-blue-700/80 text-blue-300 hover:text-white hover:bg-blue-900 transition text-[11px] font-semibold"
+                          title="Visualizar mídia original no Google Drive"
                         >
-                          <ExternalLink className="h-3.5 w-3.5" />
-                          <span>Arquivo</span>
+                          <HardDrive className="h-3 w-3 text-blue-400 shrink-0" />
+                          <span>Ver no Drive</span>
+                          <ExternalLink className="h-2.5 w-2.5 opacity-70" />
                         </a>
                       )}
                     </div>
@@ -5345,15 +5488,35 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         </div>
                       </div>
 
-                      {!selectedDeviceFile.isVideo && (
-                        <div className="flex items-start gap-2.5 rounded-lg bg-blue-950/50 border border-blue-500/30 p-2.5 text-xs text-blue-200">
-                          <Folder className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+                      {driveConnected ? (
+                        <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
+                          <HardDrive className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
                           <div>
-                            <p className="font-bold text-white">Bucket de Fotos: Google Drive</p>
-                            <p className="text-[11px] text-blue-300">
-                              Esta foto será salva e catalogada no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-blue-200">📸 Fotos com Código Único</code>) com link permanente para as TVs.
+                            <p className="font-bold text-white">Google Drive Vinculado ({driveAccountEmail || 'Conta Ativa'})</p>
+                            <p className="text-[11px] text-emerald-300">
+                              Esta mídia será salva e catalogada automaticamente no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-emerald-200">📸 Fotos com Código Único</code>) com link permanente para exibição nas TVs.
                             </p>
                           </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg bg-amber-950/40 border border-amber-500/30 p-2.5 text-xs text-amber-200">
+                          <div className="flex items-start gap-2">
+                            <HardDrive className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                            <div>
+                              <p className="font-bold text-white">Google Drive não conectado</p>
+                              <p className="text-[11px] text-amber-300">
+                                Conecte sua conta do Google Drive para salvar esta foto diretamente na nuvem do Google.
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleConnectDrive}
+                            disabled={isConnectingDrive}
+                            className="shrink-0 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-xs transition cursor-pointer text-center"
+                          >
+                            {isConnectingDrive ? 'Conectando...' : 'Conectar Google Drive'}
+                          </button>
                         </div>
                       )}
                     </div>
@@ -6854,6 +7017,101 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         onClose={() => setR2ModalOpen(false)}
         onSaved={loadData}
       />
+
+      {/* MODAL CONEXÃO GOOGLE DRIVE */}
+      {driveTokenModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 sm:p-4 backdrop-blur-md animate-fade-in"
+          onClick={() => setDriveTokenModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-5 sm:p-6 shadow-2xl text-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400">
+                  <HardDrive className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Conexão Google Drive</h3>
+                  <p className="text-xs text-slate-400">Armazenamento oficial de fotos e vídeos na nuvem</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDriveTokenModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="p-3.5 rounded-xl bg-blue-950/40 border border-blue-800/40 text-xs text-blue-200">
+                <p className="font-semibold text-white mb-1">Status da Conta:</p>
+                <p>
+                  {driveConnected
+                    ? `🟢 Conectado: ${driveAccountEmail || 'Conta Google Ativa'}`
+                    : '🟡 Nenhuma conta conectada no momento.'}
+                </p>
+              </div>
+
+              <div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await handleConnectDrive();
+                    if (driveConnected) setDriveTokenModalOpen(false);
+                  }}
+                  disabled={isConnectingDrive}
+                  className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-md"
+                >
+                  <HardDrive className="h-4 w-4" />
+                  <span>{isConnectingDrive ? 'Conectando...' : 'Conectar via Janela Google (Recomendado)'}</span>
+                </button>
+              </div>
+
+              <div className="relative flex py-1 items-center">
+                <div className="flex-grow border-t border-slate-800"></div>
+                <span className="flex-shrink mx-3 text-[11px] text-slate-500 uppercase font-semibold">ou insira credencial</span>
+                <div className="flex-grow border-t border-slate-800"></div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Token de Acesso / Refresh Token / JSON de Conta de Serviço
+                </label>
+                <textarea
+                  rows={3}
+                  value={manualDriveTokenInput}
+                  onChange={(e) => setManualDriveTokenInput(e.target.value)}
+                  placeholder="Cole aqui o token OAuth (começa com ya29.), Refresh Token (1//...) ou o JSON da Conta de Serviço..."
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:outline-hidden"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDriveTokenModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveManualDriveToken}
+                  disabled={isSavingManualToken || !manualDriveTokenInput.trim()}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingManualToken ? 'Validando...' : 'Salvar e Validar Token'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CONFIRMAÇÃO DE AÇÃO */}
       <ConfirmModal

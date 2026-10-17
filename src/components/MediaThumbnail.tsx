@@ -11,7 +11,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { Media } from '../types';
-import { resolveMediaDisplayUrl } from '../lib/googleDrive';
+import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
 
 interface MediaThumbnailProps {
   media: Media | {
@@ -223,7 +223,17 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
                 const d = Math.round((e.target as HTMLVideoElement).duration);
                 if (!isNaN(d) && d > 0) setVideoDuration(d);
               }}
-              onError={() => setHasError(true)}
+              onError={(e) => {
+                const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
+                const target = e.currentTarget;
+                if (driveId && !(target.src || '').includes('uc?export=download')) {
+                  target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                } else if ((media as any).local_url && target.src !== (media as any).local_url) {
+                  target.src = (media as any).local_url;
+                } else {
+                  setHasError(true);
+                }
+              }}
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
 
@@ -296,7 +306,19 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
           src={displayUrl}
           alt={media.name}
           referrerPolicy="no-referrer"
-          onError={() => setHasError(true)}
+          onError={(e) => {
+            const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
+            const target = e.currentTarget;
+            if (driveId && !(target.src || '').includes('thumbnail')) {
+              target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+            } else if (driveId && !(target.src || '').includes('uc?id=')) {
+              target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
+            } else if ((media as any).local_url && target.src !== (media as any).local_url) {
+              target.src = (media as any).local_url;
+            } else {
+              setHasError(true);
+            }
+          }}
           className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
         />
       ) : (

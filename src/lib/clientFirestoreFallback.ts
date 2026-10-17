@@ -1511,21 +1511,69 @@ export async function handleClientFallbackRequest(
   }
 
   if (pathOnly === '/company/media/upload-to-drive' && method === 'POST') {
-    const { uploadedFilename, fileData, filename, mimeType, name, duration, companyId, addToAllPlaylists } = body;
+    const { uploadedFilename, fileData, filename, mimeType, name, duration, companyId, addToAllPlaylists, clientDriveToken } = body;
     const win = (typeof window !== 'undefined' ? window : globalThis) as any;
     const resolvedDataUrl =
       (uploadedFilename && win.__chunkUploads?.[uploadedFilename]) ||
       fileData ||
       `/uploads/${uploadedFilename || filename}`;
     const isVideo = String(mimeType || '').startsWith('video/') || /\.(mp4|webm|mov|m4v|ogg)$/i.test(filename || '');
+    const uniqueCode = `${isVideo ? 'VID' : 'FOTO'}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+    let mediaSavedToDrive = false;
+    let driveUploadInfo: any = null;
+    const rawClientToken = clientDriveToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('mindoors_gdrive_access_token') || localStorage.getItem('google_drive_access_token') : null);
+    const validClientToken = rawClientToken && rawClientToken !== 'cast-persistent-drive-session' && rawClientToken.length >= 20 ? rawClientToken : null;
+
+    if (validClientToken && resolvedDataUrl) {
+      try {
+        const { ensureClientFolders, uploadFileToDrive, dataUrlToBlob } = await import('./googleDrive');
+        const companyObj = (dbData.companies || []).find((c: any) => c.id === (companyId || activeCompanyId));
+        const clientName = companyObj?.trade_name || companyObj?.legal_name || 'Cliente';
+        const folderStructure = await ensureClientFolders(validClientToken, clientName);
+        const targetFolder = isVideo ? folderStructure.categoryFolders.documents : folderStructure.categoryFolders.photos;
+
+        let blob: Blob | null = null;
+        if (resolvedDataUrl.startsWith('data:')) {
+          blob = dataUrlToBlob(resolvedDataUrl);
+        } else if (typeof fetch !== 'undefined') {
+          const fetchRes = await fetch(resolvedDataUrl).catch(() => null);
+          if (fetchRes?.ok) {
+            blob = await fetchRes.blob();
+          }
+        }
+
+        if (blob) {
+          const sanitizedFileName = `${uniqueCode}_${(filename || 'arquivo').replace(/\s+/g, '_')}`;
+          driveUploadInfo = await uploadFileToDrive(validClientToken, blob, sanitizedFileName, targetFolder.id, {
+            uniqueCode,
+            description: `Mídia carregada pela empresa (${uniqueCode})`,
+          });
+          mediaSavedToDrive = true;
+          console.log('[Client Fallback] Mídia enviada para Google Drive:', driveUploadInfo.id);
+        }
+      } catch (driveErr: any) {
+        console.warn('[Client Fallback] Falha ao enviar para Google Drive:', driveErr?.message || driveErr);
+      }
+    }
+
+    const targetUrl = mediaSavedToDrive && driveUploadInfo?.id
+      ? `/api/drive/stream/${driveUploadInfo.id}`
+      : resolvedDataUrl;
+
     const newMedia = {
       id: `med-${Date.now()}`,
       company_id: companyId || activeCompanyId,
       name: name || filename || 'Mídia',
       type: isVideo ? 'video' : 'image',
-      file_url: resolvedDataUrl,
-      duration: Number(duration) || 10,
-      unique_code: `${isVideo ? 'VIDEO' : 'FOTO'}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
+      file_url: targetUrl,
+      duration: Number(duration) || (isVideo ? 15 : 10),
+      unique_code: uniqueCode,
+      source: mediaSavedToDrive ? 'drive' : 'device',
+      drive_file_id: driveUploadInfo?.id,
+      drive_view_url: driveUploadInfo?.webViewLink,
+      drive_download_url: driveUploadInfo?.webContentLink,
+      local_url: resolvedDataUrl,
       created_at: new Date().toISOString(),
     };
     dbData.media = [newMedia, ...(dbData.media || [])];
@@ -1560,8 +1608,8 @@ export async function handleClientFallbackRequest(
     return {
       status: 'ok',
       media: newMedia,
-      savedToDrive: false,
-      message: 'Mídia cadastrada com sucesso!',
+      savedToDrive: mediaSavedToDrive,
+      message: mediaSavedToDrive ? 'Mídia salva e enviada para o Google Drive com sucesso!' : 'Mídia cadastrada com sucesso!',
     };
   }
 
