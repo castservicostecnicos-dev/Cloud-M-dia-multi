@@ -2045,15 +2045,17 @@ export async function handleClientFallbackRequest(
 
   if (pathOnly === '/r2/test' && method === 'POST') {
     const current = dbData.r2_settings || {};
-    const account_id = body?.account_id || current.account_id;
-    const access_key_id = body?.access_key_id || current.access_key_id;
+    const rawAccountId = body?.account_id || current.account_id || '';
+    const cleanAccountId = String(rawAccountId).trim().replace(/^https?:\/\//i, '').replace(/\.r2\.cloudflarestorage\.com.*$/i, '').replace(/dash\.cloudflare\.com\/?/i, '').split('/')[0];
+    const access_key_id = String(body?.access_key_id || current.access_key_id || '').trim();
     const secret_access_key =
       body?.secret_access_key && !body.secret_access_key.startsWith('••••')
         ? String(body.secret_access_key).trim()
-        : current.secret_access_key;
-    const bucket_name = body?.bucket_name || current.bucket_name;
+        : String(current.secret_access_key || '').trim();
+    const rawBucket = body?.bucket_name || current.bucket_name || '';
+    const cleanBucket = String(rawBucket).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
 
-    if (!account_id || !access_key_id || !secret_access_key || !bucket_name) {
+    if (!cleanAccountId || !access_key_id || !secret_access_key || !cleanBucket) {
       return {
         success: false,
         message: 'Preencha Account ID, Access Key ID, Secret Key e Nome do Bucket para testar.',
@@ -2064,7 +2066,7 @@ export async function handleClientFallbackRequest(
       const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const s3 = new S3Client({
         region: 'auto',
-        endpoint: `https://${account_id}.r2.cloudflarestorage.com`,
+        endpoint: `https://${cleanAccountId}.r2.cloudflarestorage.com`,
         credentials: {
           accessKeyId: access_key_id,
           secretAccessKey: secret_access_key,
@@ -2072,19 +2074,27 @@ export async function handleClientFallbackRequest(
       });
       const response = await s3.send(
         new ListObjectsV2Command({
-          Bucket: bucket_name,
+          Bucket: cleanBucket,
           MaxKeys: 1,
         })
       );
       return {
         success: true,
-        message: `Conexão com o Cloudflare R2 estabelecida com sucesso! Bucket "${bucket_name}" acessível.`,
-        details: { bucket: bucket_name, keyCount: response.KeyCount ?? 0 },
+        message: `Conexão com o Cloudflare R2 estabelecida com sucesso! Bucket "${cleanBucket}" acessível.`,
+        details: { bucket: cleanBucket, keyCount: response.KeyCount ?? 0 },
       };
     } catch (testErr: any) {
+      const errMsg = String(testErr?.message || testErr || '');
+      if (testErr.name === 'TypeError' || errMsg.includes('Failed to fetch') || errMsg.includes('fetch')) {
+        return {
+          success: false,
+          message: `Erro de CORS no navegador (Failed to fetch). Quando testado diretamente pelo navegador, o Cloudflare R2 exige uma regra de CORS no bucket "${cleanBucket}". No painel da Cloudflare -> R2 -> "${cleanBucket}" -> Configurações -> CORS, adicione AllowedOrigins: ["*"] e AllowedMethods: ["GET", "PUT", "POST", "HEAD"].`,
+          details: { code: 'CORS_ERROR' },
+        };
+      }
       return {
         success: false,
-        message: `Erro ao conectar no Cloudflare R2: ${testErr.message || 'Falha de autenticação.'}`,
+        message: `Erro ao conectar no Cloudflare R2: ${errMsg || 'Falha de autenticação.'}`,
         details: { code: testErr.name || testErr.Code },
       };
     }

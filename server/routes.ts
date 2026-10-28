@@ -36,6 +36,8 @@ import {
   testR2Connection,
   deleteFromR2,
   buildR2PublicUrl,
+  sanitizeR2AccountId,
+  sanitizeR2BucketName,
 } from './r2.js';
 import { R2Settings } from '../src/types';
 
@@ -4664,18 +4666,18 @@ apiRouter.post('/r2/settings', requireAuth, requireRole('admin', 'company'), asy
 });
 
 // Testar conexão com o Cloudflare R2
-apiRouter.post('/r2/test', requireAuth, async (req: AuthenticatedRequest, res) => {
+apiRouter.post('/r2/test', async (req: AuthenticatedRequest, res) => {
   try {
     const { account_id, access_key_id, secret_access_key, bucket_name } = req.body || {};
     const current = db.getR2Settings();
 
     const testConfig: Partial<R2Settings> = {
-      account_id: account_id || current.account_id,
-      access_key_id: access_key_id || current.access_key_id,
+      account_id: sanitizeR2AccountId(account_id || current.account_id),
+      access_key_id: (access_key_id || current.access_key_id || '').trim(),
       secret_access_key: (secret_access_key && !secret_access_key.startsWith('••••'))
         ? String(secret_access_key).trim()
         : current.secret_access_key,
-      bucket_name: bucket_name || current.bucket_name,
+      bucket_name: sanitizeR2BucketName(bucket_name || current.bucket_name),
     };
 
     const result = await testR2Connection(testConfig);

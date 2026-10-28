@@ -9,16 +9,15 @@ export const API_BASE_URL: string = (
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api'
 );
 
-// Detect static JAMstack deployments (e.g. Cloudflare Pages *.pages.dev) where no Node.js backend exists
+// Detect purely static JAMstack deployments (e.g. Cloudflare Pages *.pages.dev without backend)
 const isExplicitStaticHost =
   typeof window !== 'undefined' &&
   !import.meta.env.VITE_API_BASE_URL &&
   (window.location.hostname.endsWith('.pages.dev') ||
-   window.location.hostname.includes('cloudflare') ||
    window.location.hostname.endsWith('.web.app') ||
    window.location.hostname.endsWith('.firebaseapp.com'));
 
-let isDecoupledStaticMode = isExplicitStaticHost;
+let isDecoupledStaticMode = false;
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -57,8 +56,8 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
   } catch {}
 
-  // If in static JAMstack mode (e.g. Cloudflare Pages with no Node.js backend), route directly to client Firestore fallback
-  if (isDecoupledStaticMode) {
+  // Always prefer backend server for R2 and system management routes; only route directly to fallback if known static host
+  if (isExplicitStaticHost && isDecoupledStaticMode && !endpoint.startsWith('/r2/')) {
     return (await handleClientFallbackRequest(endpoint, options, token)) as T;
   }
 

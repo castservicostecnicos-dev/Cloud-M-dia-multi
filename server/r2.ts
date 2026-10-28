@@ -7,15 +7,33 @@ import {
 import { db } from './db';
 import { R2Settings } from '../src/types';
 
+export function sanitizeR2AccountId(raw: string | undefined): string {
+  if (!raw) return '';
+  let clean = raw.trim();
+  clean = clean.replace(/^https?:\/\//i, '');
+  clean = clean.replace(/\.r2\.cloudflarestorage\.com.*$/i, '');
+  clean = clean.replace(/dash\.cloudflare\.com\/?/i, '');
+  clean = clean.split('/')[0];
+  return clean.trim();
+}
+
+export function sanitizeR2BucketName(raw: string | undefined): string {
+  if (!raw) return '';
+  let clean = raw.trim();
+  clean = clean.replace(/^https?:\/\//i, '');
+  clean = clean.replace(/\/.*$/, '');
+  return clean.trim();
+}
+
 export function getEffectiveR2Config(): R2Settings {
   const dbData = db.getData();
   const dbSettings = dbData.r2_settings || { enabled: false };
 
   // Environment variables have fallback priority
-  const account_id = (dbSettings.account_id || process.env.R2_ACCOUNT_ID || '').trim();
+  const account_id = sanitizeR2AccountId(dbSettings.account_id || process.env.R2_ACCOUNT_ID || '');
   const access_key_id = (dbSettings.access_key_id || process.env.R2_ACCESS_KEY_ID || '').trim();
   const secret_access_key = (dbSettings.secret_access_key || process.env.R2_SECRET_ACCESS_KEY || '').trim();
-  const bucket_name = (dbSettings.bucket_name || process.env.R2_BUCKET_NAME || '').trim();
+  const bucket_name = sanitizeR2BucketName(dbSettings.bucket_name || process.env.R2_BUCKET_NAME || '');
   const public_domain = (dbSettings.public_domain || process.env.R2_PUBLIC_DOMAIN || '').trim();
   const enabled = dbSettings.enabled !== undefined
     ? dbSettings.enabled
@@ -36,25 +54,28 @@ export function getEffectiveR2Config(): R2Settings {
 }
 
 export function isR2Configured(config = getEffectiveR2Config()): boolean {
-  return Boolean(
-    config.account_id &&
-    config.access_key_id &&
-    config.secret_access_key &&
-    config.bucket_name
-  );
+  const accountId = sanitizeR2AccountId(config.account_id);
+  const accessKeyId = (config.access_key_id || '').trim();
+  const secretAccessKey = (config.secret_access_key || '').trim();
+  const bucketName = sanitizeR2BucketName(config.bucket_name);
+  return Boolean(accountId && accessKeyId && secretAccessKey && bucketName);
 }
 
 export function createR2Client(config = getEffectiveR2Config()): S3Client {
-  if (!config.account_id || !config.access_key_id || !config.secret_access_key) {
+  const accountId = sanitizeR2AccountId(config.account_id);
+  const accessKeyId = (config.access_key_id || '').trim();
+  const secretAccessKey = (config.secret_access_key || '').trim();
+
+  if (!accountId || !accessKeyId || !secretAccessKey) {
     throw new Error('Credenciais do Cloudflare R2 incompletas (Account ID, Access Key ID ou Secret Key ausente).');
   }
 
   return new S3Client({
     region: 'auto',
-    endpoint: `https://${config.account_id}.r2.cloudflarestorage.com`,
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: {
-      accessKeyId: config.access_key_id,
-      secretAccessKey: config.secret_access_key,
+      accessKeyId,
+      secretAccessKey,
     },
   });
 }
@@ -70,14 +91,24 @@ export function buildR2PublicUrl(key: string, config = getEffectiveR2Config()): 
     return `${domain}/${cleanKey}`;
   }
 
-  return `https://${config.bucket_name}.${config.account_id}.r2.cloudflarestorage.com/${cleanKey}`;
+  const accountId = sanitizeR2AccountId(config.account_id);
+  const bucketName = sanitizeR2BucketName(config.bucket_name);
+  return `https://${bucketName}.${accountId}.r2.cloudflarestorage.com/${cleanKey}`;
 }
 
 export async function testR2Connection(customConfig?: Partial<R2Settings>): Promise<{ success: boolean; message: string; details?: any }> {
   try {
-    const config = {
+    const rawConfig = {
       ...getEffectiveR2Config(),
       ...(customConfig || {}),
+    };
+
+    const config: R2Settings = {
+      ...rawConfig,
+      account_id: sanitizeR2AccountId(rawConfig.account_id),
+      access_key_id: (rawConfig.access_key_id || '').trim(),
+      secret_access_key: (rawConfig.secret_access_key || '').trim(),
+      bucket_name: sanitizeR2BucketName(rawConfig.bucket_name),
     };
 
     if (!config.account_id || !config.access_key_id || !config.secret_access_key || !config.bucket_name) {

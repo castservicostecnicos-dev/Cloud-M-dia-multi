@@ -312,6 +312,12 @@ export const CloudflareR2ConfigModal: React.FC<CloudflareR2ConfigModalProps> = (
                     Copie a <strong className="text-white">Access Key ID</strong>, a <strong className="text-white">Secret Access Key</strong> e o seu <strong className="text-white">Account ID</strong> e cole nos campos abaixo.
                   </li>
                   <li>
+                    Em <strong className="text-white">Settings</strong> do seu bucket, em <strong className="text-white">CORS Policy</strong>, adicione permissão de origem:
+                    <div className="mt-1 p-2 rounded bg-slate-950 font-mono text-[10px] text-orange-200 overflow-x-auto">
+                      {`[{"AllowedOrigins": ["*"], "AllowedMethods": ["GET", "PUT", "POST", "HEAD"], "AllowedHeaders": ["*"]}]`}
+                    </div>
+                  </li>
+                  <li>
                     (Opcional): Na aba de configurações do seu bucket, ative <strong className="text-white">R2.dev subdomain</strong> ou adicione um domínio customizado (ex: <code className="text-orange-300">midia.seusite.com</code>).
                   </li>
                 </ol>
@@ -330,13 +336,17 @@ export const CloudflareR2ConfigModal: React.FC<CloudflareR2ConfigModalProps> = (
                 <input
                   type="text"
                   value={form.account_id || ''}
-                  onChange={(e) => setForm({ ...form, account_id: e.target.value })}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const clean = raw.replace(/^https?:\/\//i, '').replace(/\.r2\.cloudflarestorage\.com.*$/i, '').replace(/dash\.cloudflare\.com\/?/i, '').split('/')[0].trim();
+                    setForm({ ...form, account_id: clean });
+                  }}
                   placeholder="ex: 8a4c19ef58b432a188f..."
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-orange-500 focus:outline-none font-mono"
                   required
                 />
               </div>
-              <p className="text-[10px] text-slate-500">Encontrado na visão geral da Cloudflare ou página do R2</p>
+              <p className="text-[10px] text-slate-500">ID alfanumérico de 32 caracteres (sem https:// e sem .r2...)</p>
             </div>
 
             {/* Bucket Name */}
@@ -348,7 +358,11 @@ export const CloudflareR2ConfigModal: React.FC<CloudflareR2ConfigModalProps> = (
                 <input
                   type="text"
                   value={form.bucket_name || ''}
-                  onChange={(e) => setForm({ ...form, bucket_name: e.target.value })}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    const clean = raw.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
+                    setForm({ ...form, bucket_name: clean });
+                  }}
                   placeholder="ex: indoor-midia"
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-600 focus:border-orange-500 focus:outline-none font-mono"
                   required
