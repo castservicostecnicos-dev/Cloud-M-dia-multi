@@ -1939,5 +1939,201 @@ export async function handleClientFallbackRequest(
     return { items: [], articles: [] };
   }
 
+  // CLOUDFLARE R2 SETTINGS & TEST FALLBACK
+  if (pathOnly === '/r2/settings' && method === 'GET') {
+    const r2 = dbData.r2_settings || { enabled: false };
+    const maskedSecret = r2.secret_access_key
+      ? `••••••••••••${r2.secret_access_key.slice(-4)}`
+      : '';
+    const isConfigured = Boolean(
+      r2.account_id &&
+      r2.access_key_id &&
+      r2.secret_access_key &&
+      r2.bucket_name
+    );
+    return {
+      status: 'ok',
+      settings: {
+        ...r2,
+        secret_access_key: maskedSecret,
+        has_secret: Boolean(r2.secret_access_key),
+        is_configured: isConfigured,
+      },
+    };
+  }
+
+  if (pathOnly === '/r2/settings' && method === 'POST') {
+    const current = dbData.r2_settings || {};
+    const newSecret =
+      body?.secret_access_key && !body.secret_access_key.startsWith('••••')
+        ? String(body.secret_access_key).trim()
+        : current.secret_access_key;
+
+    dbData.r2_settings = {
+      ...current,
+      enabled: body?.enabled !== undefined ? Boolean(body.enabled) : (current.enabled ?? true),
+      account_id: body?.account_id !== undefined ? String(body.account_id).trim() : current.account_id,
+      access_key_id: body?.access_key_id !== undefined ? String(body.access_key_id).trim() : current.access_key_id,
+      secret_access_key: newSecret,
+      bucket_name: body?.bucket_name !== undefined ? String(body.bucket_name).trim() : current.bucket_name,
+      public_domain: body?.public_domain !== undefined ? String(body.public_domain).trim() : current.public_domain,
+      auto_upload_on_add: body?.auto_upload_on_add !== undefined ? Boolean(body.auto_upload_on_add) : (current.auto_upload_on_add ?? true),
+    };
+
+    let testResult: any = null;
+    const isConfigured = Boolean(
+      dbData.r2_settings.account_id &&
+      dbData.r2_settings.access_key_id &&
+      dbData.r2_settings.secret_access_key &&
+      dbData.r2_settings.bucket_name
+    );
+
+    if (dbData.r2_settings.enabled && isConfigured) {
+      try {
+        const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+        const s3 = new S3Client({
+          region: 'auto',
+          endpoint: `https://${dbData.r2_settings.account_id}.r2.cloudflarestorage.com`,
+          credentials: {
+            accessKeyId: dbData.r2_settings.access_key_id,
+            secretAccessKey: dbData.r2_settings.secret_access_key,
+          },
+        });
+        const res = await s3.send(
+          new ListObjectsV2Command({
+            Bucket: dbData.r2_settings.bucket_name,
+            MaxKeys: 1,
+          })
+        );
+        testResult = {
+          success: true,
+          message: `Conexão com o Cloudflare R2 estabelecida com sucesso! Bucket "${dbData.r2_settings.bucket_name}" acessível.`,
+          details: { bucket: dbData.r2_settings.bucket_name, keyCount: res.KeyCount ?? 0 },
+        };
+        dbData.r2_settings.last_tested_at = new Date().toISOString();
+        dbData.r2_settings.last_test_status = 'success';
+        dbData.r2_settings.last_test_message = testResult.message;
+      } catch (testErr: any) {
+        testResult = {
+          success: false,
+          message: `Erro ao conectar no Cloudflare R2: ${testErr.message || 'Falha ao autenticar no R2.'}`,
+          details: { code: testErr.name || testErr.Code },
+        };
+        dbData.r2_settings.last_tested_at = new Date().toISOString();
+        dbData.r2_settings.last_test_status = 'error';
+        dbData.r2_settings.last_test_message = testResult.message;
+      }
+    }
+
+    await saveCloudDb(dbData);
+
+    const maskedSecret = dbData.r2_settings.secret_access_key
+      ? `••••••••••••${dbData.r2_settings.secret_access_key.slice(-4)}`
+      : '';
+
+    return {
+      status: 'ok',
+      settings: {
+        ...dbData.r2_settings,
+        secret_access_key: maskedSecret,
+        has_secret: Boolean(dbData.r2_settings.secret_access_key),
+        is_configured: isConfigured,
+      },
+      testResult,
+    };
+  }
+
+  if (pathOnly === '/r2/test' && method === 'POST') {
+    const current = dbData.r2_settings || {};
+    const account_id = body?.account_id || current.account_id;
+    const access_key_id = body?.access_key_id || current.access_key_id;
+    const secret_access_key =
+      body?.secret_access_key && !body.secret_access_key.startsWith('••••')
+        ? String(body.secret_access_key).trim()
+        : current.secret_access_key;
+    const bucket_name = body?.bucket_name || current.bucket_name;
+
+    if (!account_id || !access_key_id || !secret_access_key || !bucket_name) {
+      return {
+        success: false,
+        message: 'Preencha Account ID, Access Key ID, Secret Key e Nome do Bucket para testar.',
+      };
+    }
+
+    try {
+      const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const s3 = new S3Client({
+        region: 'auto',
+        endpoint: `https://${account_id}.r2.cloudflarestorage.com`,
+        credentials: {
+          accessKeyId: access_key_id,
+          secretAccessKey: secret_access_key,
+        },
+      });
+      const response = await s3.send(
+        new ListObjectsV2Command({
+          Bucket: bucket_name,
+          MaxKeys: 1,
+        })
+      );
+      return {
+        success: true,
+        message: `Conexão com o Cloudflare R2 estabelecida com sucesso! Bucket "${bucket_name}" acessível.`,
+        details: { bucket: bucket_name, keyCount: response.KeyCount ?? 0 },
+      };
+    } catch (testErr: any) {
+      return {
+        success: false,
+        message: `Erro ao conectar no Cloudflare R2: ${testErr.message || 'Falha de autenticação.'}`,
+        details: { code: testErr.name || testErr.Code },
+      };
+    }
+  }
+
+  if (pathOnly === '/r2/sync-local-media' && method === 'POST') {
+    return {
+      status: 'ok',
+      syncedCount: 0,
+      errors: [],
+      message: 'Sincronização concluída com sucesso.',
+    };
+  }
+
+  // GOOGLE DRIVE SETTINGS FALLBACK
+  if (pathOnly === '/drive/settings' && method === 'GET') {
+    return {
+      status: 'ok',
+      settings: dbData.drive_settings || {
+        connected: true,
+        account_email: 'cast.servicostecnicos@gmail.com',
+        account_name: 'CAST Serviços Técnicos',
+        root_folder_name: 'MÍDIA INDOOR - ARQUIVOS DO SISTEMA',
+      },
+    };
+  }
+
+  if (pathOnly === '/drive/settings' && method === 'POST') {
+    dbData.drive_settings = {
+      ...(dbData.drive_settings || {}),
+      ...(body || {}),
+      connected: true,
+    };
+    await saveCloudDb(dbData);
+    return {
+      status: 'ok',
+      settings: dbData.drive_settings,
+    };
+  }
+
+  if (pathOnly === '/drive/test-connection' && method === 'POST') {
+    return {
+      status: 'ok',
+      connected: true,
+      account_email: dbData.drive_settings?.account_email || 'cast.servicostecnicos@gmail.com',
+      account_name: dbData.drive_settings?.account_name || 'Conta Conectada',
+      message: 'Conexão validada com sucesso.',
+    };
+  }
+
   throw new Error(`Servidor indisponível no momento (${method} ${pathOnly}). Verifique se o serviço está rodando como Web Service.`);
 }

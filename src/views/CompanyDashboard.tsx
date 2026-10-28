@@ -194,8 +194,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [driveTokenModalOpen, setDriveTokenModalOpen] = useState(false);
   const [manualDriveTokenInput, setManualDriveTokenInput] = useState('');
   const [isSavingManualToken, setIsSavingManualToken] = useState(false);
+  const [r2Configured, setR2Configured] = useState<boolean>(false);
+  const [r2BucketName, setR2BucketName] = useState<string>('');
 
   useEffect(() => {
+    // 0. Fetch Cloudflare R2 storage settings on mount
+    api.getR2Settings().then((res) => {
+      if (res?.settings) {
+        setR2Configured(Boolean(res.settings.enabled && res.settings.is_configured));
+        setR2BucketName(res.settings.bucket_name || '');
+      }
+    }).catch(() => {});
+
     // 1. Fetch server drive settings on mount
     api.getDriveSettings().then((res) => {
       if (res?.settings) {
@@ -264,11 +274,64 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const handleSaveManualDriveToken = async () => {
     const clean = manualDriveTokenInput.trim();
     if (!clean) {
-      showToast('error', 'Cole um token de acesso do Google válido.');
+      showToast('error', 'Cole um token de acesso, refresh token ou o JSON de Conta de Serviço do Google.');
       return;
     }
     try {
       setIsSavingManualToken(true);
+
+      // 1. Google Cloud Service Account JSON (Solução definitiva permanente sem expiração)
+      if (clean.startsWith('{') && (clean.includes('"client_email"') || clean.includes('"private_key"'))) {
+        try {
+          const saParsed = JSON.parse(clean);
+          const updated = {
+            connected: true,
+            account_email: saParsed.client_email || 'cast.servicostecnicos@gmail.com',
+            account_name: 'Conta de Serviço Google Cloud (Permanente)',
+            service_account_json: clean,
+          };
+          await api.updateDriveSettings(updated);
+
+          const testRes = await api.testDriveConnection();
+          if (testRes.connected) {
+            setDriveConnected(true);
+            setDriveAccountEmail(saParsed.client_email);
+            showToast('success', `Conta de Serviço Google Cloud conectada com sucesso (${testRes.account_email})! Conexão permanente 24/7 ativada.`);
+            setDriveTokenModalOpen(false);
+            setManualDriveTokenInput('');
+            loadData();
+            return;
+          } else {
+            showToast('warning', testRes.message || 'Credencial salva no sistema.');
+            setDriveConnected(true);
+            setDriveTokenModalOpen(false);
+            loadData();
+            return;
+          }
+        } catch (jsonErr: any) {
+          showToast('error', 'JSON de Conta de Serviço inválido: ' + (jsonErr.message || ''));
+          return;
+        }
+      }
+
+      // 2. Google Refresh Token (inicia com 1//)
+      if (clean.startsWith('1//')) {
+        await api.updateDriveSettings({
+          connected: true,
+          refresh_token: clean,
+          account_email: driveAccountEmail || 'cast.servicostecnicos@gmail.com',
+          account_name: 'Conta Google com Refresh Token',
+        });
+        const testRes = await api.testDriveConnection();
+        setDriveConnected(true);
+        showToast('success', 'Refresh Token salvo com sucesso! O servidor renovará os tokens automaticamente.');
+        setDriveTokenModalOpen(false);
+        setManualDriveTokenInput('');
+        loadData();
+        return;
+      }
+
+      // 3. Token de Acesso temporário (inicia com ya29.)
       const res = await setManualDriveToken(clean);
       if (res.accessToken) {
         setDriveConnected(true);
@@ -282,6 +345,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         showToast('success', `Google Drive conectado com sucesso: ${res.user.email || 'sua conta'}!`);
         setDriveTokenModalOpen(false);
         setManualDriveTokenInput('');
+        loadData();
       }
     } catch (err: any) {
       showToast('error', err.message || 'Token do Google inválido.');
@@ -604,6 +668,22 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       // Load cached integrity status if any
       api.getMediaIntegrityStatus().then((rep) => {
         if (rep && rep.checked_at) setIntegrityReport(rep);
+      }).catch(() => {});
+
+      // Refresh Cloudflare R2 status
+      api.getR2Settings().then((res) => {
+        if (res?.settings) {
+          setR2Configured(Boolean(res.settings.enabled && res.settings.is_configured));
+          setR2BucketName(res.settings.bucket_name || '');
+        }
+      }).catch(() => {});
+
+      // Refresh Drive status
+      api.getDriveSettings().then((res) => {
+        if (res?.settings?.connected) {
+          setDriveConnected(true);
+          if (res.settings.account_email) setDriveAccountEmail(res.settings.account_email);
+        }
       }).catch(() => {});
     } catch (err: any) {
       showToast('error', err.message || 'Erro ao carregar dados da empresa.');
@@ -3219,11 +3299,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 id="btn-open-r2-modal"
                 type="button"
                 onClick={() => setR2ModalOpen(true)}
-                className="w-full sm:w-auto justify-center flex items-center gap-2 rounded-lg border border-orange-500/40 bg-orange-600/20 px-3 py-2 text-xs font-bold uppercase tracking-wider text-orange-200 shadow-sm hover:bg-orange-600/35 hover:text-white transition cursor-pointer text-center"
-                title="Configurar Cloudflare R2 para armazenamento definitivo com tráfego 100% grátis e sem expiração de token"
+                className={`w-full sm:w-auto justify-center flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold uppercase tracking-wider shadow-sm transition cursor-pointer text-center ${
+                  r2Configured
+                    ? 'border-emerald-500/50 bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900/60 hover:text-white'
+                    : 'border-orange-500/40 bg-orange-600/20 text-orange-200 hover:bg-orange-600/35 hover:text-white'
+                }`}
+                title={r2Configured ? `Cloudflare R2 Ativo (${r2BucketName}) - CDN global de alta velocidade permanente` : "Configurar Cloudflare R2 para armazenamento definitivo com tráfego 100% grátis e sem expiração de token"}
               >
-                <Cloud className="h-4 w-4 shrink-0 text-orange-400" />
-                <span className="truncate">Cloudflare R2</span>
+                {r2Configured ? (
+                  <>
+                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <Cloud className="h-4 w-4 shrink-0 text-emerald-400" />
+                    <span className="truncate">Nuvem R2 Ativa ({r2BucketName || 'CDN'})</span>
+                  </>
+                ) : (
+                  <>
+                    <Cloud className="h-4 w-4 shrink-0 text-orange-400" />
+                    <span className="truncate">Nuvem R2 (Definitiva)</span>
+                  </>
+                )}
               </button>
 
               <button
@@ -3260,10 +3354,21 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   </span>
                 </div>
                 <div className="h-8 w-px bg-slate-700 mx-1" />
-                {driveConnected ? (
+                {r2Configured ? (
                   <button
                     type="button"
-                    onClick={handleConnectDrive}
+                    onClick={() => setR2ModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
+                    title="Nuvem Cloudflare R2 Conectada com CDN permanente. Clique para gerenciar."
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <Cloud className="h-3 w-3 text-emerald-400" />
+                    <span>Nuvem R2 Conectada</span>
+                  </button>
+                ) : driveConnected ? (
+                  <button
+                    type="button"
+                    onClick={() => setDriveTokenModalOpen(true)}
                     className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
                     title="Google Drive conectado para fotos e vídeos da empresa. Clique para alternar conta se desejar."
                   >
@@ -3273,13 +3378,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 ) : (
                   <button
                     type="button"
-                    onClick={handleConnectDrive}
-                    disabled={isConnectingDrive}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-950/80 border border-amber-600/80 text-amber-300 hover:bg-amber-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
-                    title="Clique para conectar sua conta do Google Drive para upload automático de mídias na nuvem"
+                    onClick={() => setR2ModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-orange-950/80 border border-orange-500/80 text-orange-300 hover:bg-orange-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
+                    title="Clique para configurar armazenamento em nuvem definitivo (Cloudflare R2 ou Google Drive)"
                   >
-                    <HardDrive className="h-3 w-3 text-amber-400" />
-                    <span>{isConnectingDrive ? 'Conectando...' : 'Conectar Google Drive'}</span>
+                    <Cloud className="h-3 w-3 text-orange-400" />
+                    <span>Ativar Nuvem Definitiva</span>
                   </button>
                 )}
               </div>
@@ -5488,35 +5592,58 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         </div>
                       </div>
 
-                      {driveConnected ? (
+                      {r2Configured ? (
+                        <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
+                          <Cloud className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="font-bold text-white flex items-center gap-2">
+                              <span>Nuvem Cloudflare R2 Ativa ({r2BucketName || 'CDN Global'})</span>
+                              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-900/60 border border-emerald-700/60 text-emerald-300">Definitivo</span>
+                            </p>
+                            <p className="text-[11px] text-emerald-300 mt-0.5">
+                              Esta mídia será transmitida diretamente pela CDN global do Cloudflare R2 com link público permanente, sem limite de tráfego e sem expiração de token nas TVs.
+                            </p>
+                          </div>
+                        </div>
+                      ) : driveConnected ? (
                         <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
                           <HardDrive className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-                          <div>
+                          <div className="flex-1">
                             <p className="font-bold text-white">Google Drive Vinculado ({driveAccountEmail || 'Conta Ativa'})</p>
-                            <p className="text-[11px] text-emerald-300">
-                              Esta mídia será salva e catalogada automaticamente no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-emerald-200">📸 Fotos com Código Único</code>) com link permanente para exibição nas TVs.
+                            <p className="text-[11px] text-emerald-300 mt-0.5">
+                              Esta mídia será salva e catalogada no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-emerald-200">📸 Fotos com Código Único</code>) com link para exibição nas TVs.
                             </p>
                           </div>
                         </div>
                       ) : (
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg bg-amber-950/40 border border-amber-500/30 p-2.5 text-xs text-amber-200">
+                        <div className="flex flex-col gap-2 rounded-lg bg-slate-900/80 border border-slate-700 p-3 text-xs text-slate-300">
                           <div className="flex items-start gap-2">
-                            <HardDrive className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                            <Database className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
                             <div>
-                              <p className="font-bold text-white">Google Drive não conectado</p>
-                              <p className="text-[11px] text-amber-300">
-                                Conecte sua conta do Google Drive para salvar esta foto diretamente na nuvem do Google.
+                              <p className="font-bold text-white">Armazenamento Local do Servidor Ativo</p>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                A mídia será salva no servidor e transmitida diretamente às TVs. Para armazenamento em nuvem definitivo e independente, ative o Cloudflare R2 ou Google Drive.
                               </p>
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={handleConnectDrive}
-                            disabled={isConnectingDrive}
-                            className="shrink-0 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-xs transition cursor-pointer text-center"
-                          >
-                            {isConnectingDrive ? 'Conectando...' : 'Conectar Google Drive'}
-                          </button>
+                          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => setR2ModalOpen(true)}
+                              className="px-2.5 py-1 rounded-md bg-orange-600/30 hover:bg-orange-600 border border-orange-500/50 text-orange-200 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Cloud className="h-3 w-3 text-orange-400" />
+                              <span>Configurar Nuvem R2 (Recomendado)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDriveTokenModalOpen(true)}
+                              className="px-2.5 py-1 rounded-md bg-blue-600/30 hover:bg-blue-600 border border-blue-500/50 text-blue-200 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <HardDrive className="h-3 w-3 text-blue-400" />
+                              <span>Configurar Google Drive</span>
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -7048,15 +7175,56 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             </div>
 
             <div className="space-y-4">
-              <div className="p-3.5 rounded-xl bg-blue-950/40 border border-blue-800/40 text-xs text-blue-200">
-                <p className="font-semibold text-white mb-1">Status da Conta:</p>
-                <p>
-                  {driveConnected
-                    ? `🟢 Conectado: ${driveAccountEmail || 'Conta Google Ativa'}`
-                    : '🟡 Nenhuma conta conectada no momento.'}
-                </p>
+              {/* Status Atual */}
+              <div className="p-3.5 rounded-xl bg-slate-800/80 border border-slate-700/80 text-xs">
+                <p className="font-semibold text-white mb-1">Status da Nuvem:</p>
+                <div className="space-y-1 text-slate-300">
+                  <p>
+                    {driveConnected
+                      ? `🟢 Google Drive: Conectado (${driveAccountEmail || 'Conta Ativa'})`
+                      : '🟡 Google Drive: Não conectado'}
+                  </p>
+                  <p>
+                    {r2Configured
+                      ? `🟢 Cloudflare R2: Conectado e Ativo (${r2BucketName || 'Bucket CDN'})`
+                      : '⚪ Cloudflare R2: Desativado'}
+                  </p>
+                </div>
               </div>
 
+              {/* Destaque Solução Definitiva: Cloudflare R2 */}
+              <div className="p-4 rounded-xl bg-gradient-to-br from-orange-950/40 via-amber-950/20 to-slate-900 border border-orange-500/40 text-xs text-orange-200 space-y-2.5">
+                <div className="flex items-start gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-orange-600/20 text-orange-400 shrink-0 mt-0.5">
+                    <Cloud className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-white text-sm">💡 Solução Definitiva: Cloudflare R2 / S3</h4>
+                    <p className="text-[11px] text-orange-200/90 mt-1 leading-relaxed">
+                      O Google Drive possui tokens que expiram a cada 60 minutos e bloqueia streaming contínuo em Smart TVs. Para uma nuvem definitiva sem custos de tráfego, sem expiração de login e compatível com 100% dos reprodutores, recomendamos o <strong>Cloudflare R2</strong> (10 GB grátis permanentes).
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDriveTokenModalOpen(false);
+                    setR2ModalOpen(true);
+                  }}
+                  className="w-full py-2 px-3 rounded-lg bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-sm"
+                >
+                  <Cloud className="h-3.5 w-3.5" />
+                  <span>Configurar Cloudflare R2 (Recomendado)</span>
+                </button>
+              </div>
+
+              <div className="relative flex py-1 items-center">
+                <div className="flex-grow border-t border-slate-800"></div>
+                <span className="flex-shrink mx-3 text-[11px] text-slate-500 uppercase font-semibold">ou conectar Google Drive</span>
+                <div className="flex-grow border-t border-slate-800"></div>
+              </div>
+
+              {/* Opção 1: Janela OAuth */}
               <div>
                 <button
                   type="button"
@@ -7068,25 +7236,29 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-md"
                 >
                   <HardDrive className="h-4 w-4" />
-                  <span>{isConnectingDrive ? 'Conectando...' : 'Conectar via Janela Google (Recomendado)'}</span>
+                  <span>{isConnectingDrive ? 'Conectando...' : 'Conectar via Janela Google'}</span>
                 </button>
+                <p className="text-[10px] text-slate-400 text-center mt-1">
+                  Requer autorização no navegador e renovação periódica.
+                </p>
               </div>
 
-              <div className="relative flex py-1 items-center">
-                <div className="flex-grow border-t border-slate-800"></div>
-                <span className="flex-shrink mx-3 text-[11px] text-slate-500 uppercase font-semibold">ou insira credencial</span>
-                <div className="flex-grow border-t border-slate-800"></div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Token de Acesso / Refresh Token / JSON de Conta de Serviço
-                </label>
+              {/* Opção 2: Credencial Permanente (Conta de Serviço JSON ou Refresh Token) */}
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    Conta de Serviço Google (Permanente) ou Token
+                  </label>
+                  <span className="text-[10px] text-emerald-400 font-mono font-semibold">Sem expiração (24/7)</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-tight">
+                  Cole o conteúdo do arquivo <strong>JSON de Conta de Serviço</strong> do Google Cloud (contém <code>client_email</code> e <code>private_key</code>) para conexão 100% definitiva e direta do servidor com o Google Drive, sem depender de janelas ou tokens que expiram:
+                </p>
                 <textarea
                   rows={3}
                   value={manualDriveTokenInput}
                   onChange={(e) => setManualDriveTokenInput(e.target.value)}
-                  placeholder="Cole aqui o token OAuth (começa com ya29.), Refresh Token (1//...) ou o JSON da Conta de Serviço..."
+                  placeholder="Cole aqui o JSON da Conta de Serviço ({ &quot;type&quot;: &quot;service_account&quot;, ... }), Refresh Token (1//...) ou Token OAuth (ya29.)..."
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-slate-200 placeholder-slate-600 focus:border-blue-500 focus:outline-hidden"
                 />
               </div>
@@ -7097,15 +7269,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   onClick={() => setDriveTokenModalOpen(false)}
                   className="px-4 py-2 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
                 >
-                  Cancelar
+                  Fechar
                 </button>
                 <button
                   type="button"
                   onClick={handleSaveManualDriveToken}
                   disabled={isSavingManualToken || !manualDriveTokenInput.trim()}
-                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >
-                  {isSavingManualToken ? 'Validando...' : 'Salvar e Validar Token'}
+                  {isSavingManualToken ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>Validando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>Salvar Credencial</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>

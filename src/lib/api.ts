@@ -67,8 +67,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   let data: any = null;
   let parseFailed = false;
 
-  const isFileUpload = endpoint.includes('/upload');
-  const timeoutMs = isFileUpload ? 60000 : 5000;
+  const isSlowEndpoint =
+    endpoint.includes('/upload') ||
+    endpoint.includes('/r2/') ||
+    endpoint.includes('/drive/') ||
+    endpoint.includes('/sync') ||
+    endpoint.includes('/integrity');
+  const timeoutMs = isSlowEndpoint ? 60000 : 15000;
   const controller = new AbortController();
   const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -83,7 +88,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
     // If server returned HTML (e.g. index.html SPA rewrite because /api route does not exist on Cloudflare Pages)
     if (contentType.includes('text/html')) {
-      isDecoupledStaticMode = true;
+      if (isExplicitStaticHost) isDecoupledStaticMode = true;
       return (await handleClientFallbackRequest(endpoint, options, token)) as T;
     }
 
@@ -105,14 +110,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
     // If 404 on API endpoint, host is static, route to fallback
     if (response.status === 404) {
-      isDecoupledStaticMode = true;
+      if (isExplicitStaticHost) isDecoupledStaticMode = true;
       return (await handleClientFallbackRequest(endpoint, options, token)) as T;
     }
     throw new Error(data?.error || data?.message || `Erro no servidor (${response.status}): Falha ao processar a requisição.`);
   }
 
   if (!response || parseFailed) {
-    isDecoupledStaticMode = true;
+    if (isExplicitStaticHost) isDecoupledStaticMode = true;
     return (await handleClientFallbackRequest(endpoint, options, token)) as T;
   }
 
