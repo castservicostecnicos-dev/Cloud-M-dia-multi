@@ -9,3 +9,15 @@ coverage/
 data/
 uploads/
 bun.lock*
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.zip
+*.tar.gz
+*.iso
+.cache/
+.vite/
+.vercel/
+

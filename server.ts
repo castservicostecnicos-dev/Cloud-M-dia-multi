@@ -115,6 +115,9 @@ async function startServer() {
     res.status(404).json({ error: `Endpoint de API não encontrado: ${req.method} ${req.originalUrl}` });
   });
 
+  // Serve public static files directly (icons, manifest, zip downloads)
+  app.use(express.static(path.join(process.cwd(), 'public')));
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
