@@ -8,6 +8,7 @@ import {
   signOut,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { getCachedIndexedDbMediaSync, getIndexedDbMedia } from './indexedDbMedia';
 
 // Firebase Auth configuration for Google Drive OAuth
 const firebaseAuthConfig = {
@@ -815,6 +816,17 @@ export const resolveMediaDisplayUrl = (url: string | undefined | null): string =
     if (fileId) {
       return origin ? `${origin}/api/drive/stream/${fileId}` : `/api/drive/stream/${fileId}`;
     }
+  }
+
+  // Check IndexedDB local media storage
+  if (trimmed.startsWith('idb:')) {
+    try {
+      const cached = getCachedIndexedDbMediaSync(trimmed);
+      if (cached) return cached;
+      // Kick off background retrieval to warm the cache
+      getIndexedDbMedia(trimmed);
+    } catch {}
+    return trimmed;
   }
 
   return trimmed;

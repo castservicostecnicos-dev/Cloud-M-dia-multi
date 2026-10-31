@@ -1,6 +1,7 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore/lite';
 import initialSnapshot from './initialDataSnapshot.json';
+import { saveIndexedDbMedia, getIndexedDbMedia, getCachedIndexedDbMediaSync, deleteIndexedDbMedia } from './indexedDbMedia';
 
 const COLLECTION_NAME = 'app_data';
 const DOCUMENT_ID = 'indoor_media_cloudflare_db';
@@ -39,11 +40,70 @@ let lastLoadedAt = 0;
 
 function normalizeDbShape(parsed: any) {
   const stores = parsed.company_stores || parsed.stores || [];
-  return {
+  const normalized = {
     ...DEFAULT_DB,
     ...parsed,
     company_stores: stores,
     stores,
+  };
+
+  // Hydrate idb: URLs if present in local IndexedDB
+  if (Array.isArray(normalized.media)) {
+    for (const m of normalized.media) {
+      if (typeof m.file_url === 'string' && m.file_url.startsWith('idb:')) {
+        const cached = getCachedIndexedDbMediaSync(m.id);
+        if (cached) {
+          m.file_url = cached;
+        } else {
+          getIndexedDbMedia(m.id).then((val) => {
+            if (val) m.file_url = val;
+          }).catch(() => {});
+        }
+      }
+    }
+  }
+
+  return normalized;
+}
+
+function createCleanLightweightDb(dbData: any) {
+  const cleanMedia = (dbData.media || []).map((m: any) => {
+    let cleanFileUrl = m.file_url;
+    if (typeof cleanFileUrl === 'string' && (cleanFileUrl.startsWith('data:') || cleanFileUrl.length > 500)) {
+      cleanFileUrl = `idb:${m.id}`;
+    }
+    const copy = { ...m, file_url: cleanFileUrl };
+    delete copy.local_url;
+    return copy;
+  });
+
+  const cleanPlaylists = (dbData.playlists || []).map((pl: any) => ({
+    ...pl,
+    items: (pl.items || []).map((it: any) => {
+      let cleanFileUrl = it.file_url;
+      if (typeof cleanFileUrl === 'string' && (cleanFileUrl.startsWith('data:') || cleanFileUrl.length > 500)) {
+        cleanFileUrl = `idb:${it.media_id || it.id}`;
+      }
+      return { ...it, file_url: cleanFileUrl };
+    }),
+  }));
+
+  const cleanDriveDocs = (dbData.drive_documents || []).map((d: any) => {
+    const copy = { ...d };
+    if (typeof copy.drive_view_url === 'string' && (copy.drive_view_url.startsWith('data:') || copy.drive_view_url.length > 500)) {
+      copy.drive_view_url = `idb:${d.id}`;
+    }
+    if (typeof copy.drive_download_url === 'string' && (copy.drive_download_url.startsWith('data:') || copy.drive_download_url.length > 500)) {
+      delete copy.drive_download_url;
+    }
+    return copy;
+  });
+
+  return {
+    ...dbData,
+    media: cleanMedia,
+    playlists: cleanPlaylists,
+    drive_documents: cleanDriveDocs,
   };
 }
 
@@ -98,7 +158,7 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
         lastLoadedAt = Date.now();
         try {
           if ((cachedDb.companies?.length || 0) > 0) {
-            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(cachedDb));
+            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(createCleanLightweightDb(cachedDb)));
           }
         } catch {}
         return cachedDb;
@@ -114,7 +174,7 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
         lastLoadedAt = Date.now();
         try {
           if ((cachedDb.companies?.length || 0) > 0) {
-            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(cachedDb));
+            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(createCleanLightweightDb(cachedDb)));
           }
         } catch {}
         return cachedDb;
@@ -140,35 +200,29 @@ async function saveCloudDb(dbData: any): Promise<void> {
   dbData.stores = dbData.company_stores;
   cachedDb = dbData;
   lastLoadedAt = Date.now();
+
+  // Persist any base64 media locally in IndexedDB before saving
+  if (Array.isArray(dbData.media)) {
+    for (const m of dbData.media) {
+      if (typeof m.file_url === 'string' && m.file_url.startsWith('data:')) {
+        saveIndexedDbMedia(m.id, m.file_url).catch(() => {});
+      }
+    }
+  }
+
+  // Create lightweight sanitized DB without bulky base64 data to guarantee < 100KB payload
+  const lightweightDb = createCleanLightweightDb(dbData);
+  const serialized = JSON.stringify(lightweightDb);
+
   // Safe localStorage save
   try {
-    localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(dbData));
-  } catch {
-    try {
-      const lightweight = {
-        ...dbData,
-        media: (dbData.media || []).map((m: any) => ({
-          ...m,
-          file_url: m.file_url && m.file_url.length > 5000 && m.file_url.startsWith('data:') ? `/uploads/${m.id}.bin` : m.file_url,
-        })),
-      };
-      localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(lightweight));
-    } catch {}
+    localStorage.setItem(LOCAL_DB_CACHE_KEY, serialized);
+  } catch (err) {
+    console.warn('[ClientFallback] Notice writing to localStorage:', err);
   }
 
   try {
     const fs = getClientFirestore();
-    let serialized = JSON.stringify(dbData);
-    if (serialized.length > 900000) {
-      const lightweight = {
-        ...dbData,
-        media: (dbData.media || []).map((m: any) => ({
-          ...m,
-          file_url: m.file_url && m.file_url.length > 5000 && m.file_url.startsWith('data:') ? `/uploads/${m.id}.bin` : m.file_url,
-        })),
-      };
-      serialized = JSON.stringify(lightweight);
-    }
     await setDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID), {
       version: 1,
       updated_at: new Date().toISOString(),
@@ -612,7 +666,14 @@ export async function handleClientFallbackRequest(
     return (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId);
   }
   if (pathOnly === '/company/media' && method === 'GET') {
-    return (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
+    const list = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
+    return list.map((m: any) => {
+      if (typeof m.file_url === 'string' && m.file_url.startsWith('idb:')) {
+        const cached = getCachedIndexedDbMediaSync(m.id);
+        if (cached) return { ...m, file_url: cached };
+      }
+      return m;
+    });
   }
   if (pathOnly === '/company/rss' && method === 'GET') {
     return (dbData.rss_feeds || []).filter((r: any) => r.company_id === activeCompanyId);
@@ -838,6 +899,7 @@ export async function handleClientFallbackRequest(
 
   if (pathOnly.startsWith('/company/media/') && method === 'DELETE') {
     const medId = pathOnly.split('/')[3];
+    deleteIndexedDbMedia(medId);
     dbData.media = (dbData.media || []).filter((m: any) => m.id !== medId);
     await saveCloudDb(dbData);
     return { message: 'Mídia excluída com sucesso.' };
@@ -1557,23 +1619,114 @@ export async function handleClientFallbackRequest(
       }
     }
 
-    const targetUrl = mediaSavedToDrive && driveUploadInfo?.id
-      ? `/api/drive/stream/${driveUploadInfo.id}`
-      : resolvedDataUrl;
+    // Check Cloudflare R2 direct client upload if R2 is configured and enabled
+    let mediaSavedToR2 = false;
+    let r2PublicUrl = '';
+    const r2 = dbData.r2_settings;
+    if (
+      !mediaSavedToDrive &&
+      r2?.enabled &&
+      r2?.account_id &&
+      r2?.access_key_id &&
+      r2?.secret_access_key &&
+      r2?.bucket_name &&
+      resolvedDataUrl
+    ) {
+      try {
+        const cleanAccountId = String(r2.account_id).trim().replace(/^https?:\/\//i, '').replace(/\.r2\.cloudflarestorage\.com.*$/i, '');
+        const cleanBucket = String(r2.bucket_name).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+        const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3 = new S3Client({
+          region: 'auto',
+          endpoint: `https://${cleanAccountId}.r2.cloudflarestorage.com`,
+          credentials: {
+            accessKeyId: String(r2.access_key_id).trim(),
+            secretAccessKey: String(r2.secret_access_key).trim(),
+          },
+        });
+
+        let fileBuffer: Uint8Array | null = null;
+        let detectedMime = mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
+
+        if (resolvedDataUrl.startsWith('data:')) {
+          const parts = resolvedDataUrl.split(',');
+          const mimeMatch = parts[0].match(/:(.*?);/);
+          if (mimeMatch) detectedMime = mimeMatch[1];
+          const bstr = atob(parts[1]);
+          const u8 = new Uint8Array(bstr.length);
+          for (let i = 0; i < bstr.length; i++) {
+            u8[i] = bstr.charCodeAt(i);
+          }
+          fileBuffer = u8;
+        } else if (typeof fetch !== 'undefined') {
+          const fetchRes = await fetch(resolvedDataUrl).catch(() => null);
+          if (fetchRes?.ok) {
+            const arr = await fetchRes.arrayBuffer();
+            fileBuffer = new Uint8Array(arr);
+          }
+        }
+
+        if (fileBuffer) {
+          const safeExt = (filename || 'file.bin').split('.').pop() || (isVideo ? 'mp4' : 'jpg');
+          const r2Key = `media-${Date.now()}-${uniqueCode}.${safeExt}`;
+          await s3.send(
+            new PutObjectCommand({
+              Bucket: cleanBucket,
+              Key: r2Key,
+              Body: fileBuffer,
+              ContentType: detectedMime,
+            })
+          );
+
+          if (r2.public_url && r2.public_url.trim()) {
+            r2PublicUrl = `${r2.public_url.trim().replace(/\/+$/, '')}/${r2Key}`;
+          } else {
+            r2PublicUrl = `https://${cleanBucket}.${cleanAccountId}.r2.cloudflarestorage.com/${r2Key}`;
+          }
+          mediaSavedToR2 = true;
+          console.log('[Client Fallback] Mídia enviada para Cloudflare R2:', r2PublicUrl);
+        }
+      } catch (r2Err: any) {
+        console.warn('[Client Fallback] Falha ao enviar para Cloudflare R2:', r2Err?.message || r2Err);
+      }
+    }
+
+    const newMediaId = `med-${Date.now()}`;
+    let targetUrl = resolvedDataUrl;
+    let mediaSource: 'drive' | 'r2' | 'device' = 'device';
+
+    if (mediaSavedToDrive && driveUploadInfo?.id) {
+      targetUrl = `/api/drive/stream/${driveUploadInfo.id}`;
+      mediaSource = 'drive';
+    } else if (mediaSavedToR2 && r2PublicUrl) {
+      targetUrl = r2PublicUrl;
+      mediaSource = 'r2';
+    } else {
+      // Local device storage: persist in IndexedDB for fast, high-capacity client playback
+      if (resolvedDataUrl) {
+        await saveIndexedDbMedia(newMediaId, resolvedDataUrl);
+      }
+      targetUrl = resolvedDataUrl;
+      mediaSource = 'device';
+    }
+
+    // Clean up temporary chunk uploads from memory
+    if (uploadedFilename && win.__chunkUploads?.[uploadedFilename]) {
+      delete win.__chunkUploads[uploadedFilename];
+    }
 
     const newMedia = {
-      id: `med-${Date.now()}`,
+      id: newMediaId,
       company_id: companyId || activeCompanyId,
       name: name || filename || 'Mídia',
       type: isVideo ? 'video' : 'image',
       file_url: targetUrl,
       duration: Number(duration) || (isVideo ? 15 : 10),
       unique_code: uniqueCode,
-      source: mediaSavedToDrive ? 'drive' : 'device',
+      source: mediaSource,
       drive_file_id: driveUploadInfo?.id,
       drive_view_url: driveUploadInfo?.webViewLink,
       drive_download_url: driveUploadInfo?.webContentLink,
-      local_url: resolvedDataUrl,
       created_at: new Date().toISOString(),
     };
     dbData.media = [newMedia, ...(dbData.media || [])];

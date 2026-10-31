@@ -2453,7 +2453,7 @@ apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: Auth
   const maxMedia =
     company?.max_media !== undefined && company.max_media !== null
       ? Number(company.max_media)
-      : (plan?.max_media || plan?.max_storage || 20);
+      : Math.max(500, Number(plan?.max_media || plan?.max_storage || 500));
 
   if (currentCount >= maxMedia) {
     return res.status(400).json({
@@ -5336,7 +5336,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
     const maxMedia =
       company.max_media !== undefined && company.max_media !== null
         ? Number(company.max_media)
-        : (plan?.max_media || plan?.max_storage || 20);
+        : Math.max(500, Number(plan?.max_media || plan?.max_storage || 500));
     if (currentMedia.length >= maxMedia) {
       return res.status(400).json({
         error: `Limite de mídias atingido para seu plano (${currentMedia.length}/${maxMedia}). Remova mídias obsoletas ou solicite aumento de cota.`
