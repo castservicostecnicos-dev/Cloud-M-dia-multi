@@ -1687,13 +1687,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
 
       const previewUrl = URL.createObjectURL(file);
-      const autoTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ').trim() || file.name;
+      // Mantém o nome original com o qual o arquivo sobe
+      const originalName = file.name;
 
       newItems.push({
         id: `qf-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         file,
         dataUrl: previewUrl,
-        name: autoTitle,
+        name: originalName,
         sizeFormatted: formatFileSize(file.size),
         type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
         isVideo,
@@ -1703,14 +1704,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
     if (newItems.length > 0) {
       setSelectedDeviceFiles((prev) => [...prev, ...newItems]);
-      if (newItems.length === 1 && !mediaForm.name.trim()) {
-        setMediaForm((prev) => ({
-          ...prev,
-          name: newItems[0].name,
-          type: newItems[0].isVideo ? 'video' : 'image',
-          duration: newItems[0].duration,
-        }));
-      }
     }
   };
 
@@ -1738,19 +1731,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setUploadProgressStatus('Preparando envio...');
       const createdMedias: Media[] = [];
 
-      // Determinar quais playlists devem receber a nova mídia
+      // Para mídias do dispositivo, o upload salva na biblioteca sem vincular a playlists antecipadamente
+      // O usuário escolherá as playlists e o tempo depois via "Escolher Playlists" no card da mídia
       const isTargetAllPlaylists =
-        uploadToAllPlaylists ||
-        targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
-        (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
+        mediaSourceType === 'device'
+          ? false
+          : uploadToAllPlaylists ||
+            targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
+            (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
 
-      const targetPlIds = isTargetAllPlaylists
-        ? playlists.map((p) => p.id)
-        : targetPlaylistIdsForNewMedia.length > 0
-        ? targetPlaylistIdsForNewMedia
-        : targetPlaylistIdForNewMedia
-        ? [targetPlaylistIdForNewMedia]
-        : (editingPlaylist ? [editingPlaylist.id] : []);
+      const targetPlIds =
+        mediaSourceType === 'device'
+          ? []
+          : isTargetAllPlaylists
+          ? playlists.map((p) => p.id)
+          : targetPlaylistIdsForNewMedia.length > 0
+          ? targetPlaylistIdsForNewMedia
+          : targetPlaylistIdForNewMedia
+          ? [targetPlaylistIdForNewMedia]
+          : (editingPlaylist ? [editingPlaylist.id] : []);
 
       if (mediaSourceType === 'device') {
         if (selectedDeviceFiles.length === 0) {
@@ -1770,7 +1769,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
         for (let i = 0; i < totalFiles; i++) {
           const fileItem = selectedDeviceFiles[i];
-          const fileTitle = fileItem.name.trim() || `Mídia ${i + 1}`;
+          const fileTitle = fileItem.name.trim() || fileItem.file.name;
           setUploadProgressStatus(`Enviando ${i + 1} de ${totalFiles}: ${fileTitle}...`);
 
           try {
@@ -1778,7 +1777,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               file: fileItem.file,
               name: fileTitle,
               duration: Number(fileItem.duration) || (fileItem.isVideo ? 15 : 10),
-              addToAllPlaylists: isTargetAllPlaylists,
+              addToAllPlaylists: false,
               clientDriveToken: currentToken,
               onProgress: (pct) => {
                 const stepBase = (i / totalFiles) * 100;
@@ -1909,9 +1908,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
       showToast(
         'success',
-        createdMedias.length === 1
-          ? `Mídia "${createdMedias[0].name}" enviada e sincronizada na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
-          : `${createdMedias.length} mídias enviadas e sincronizadas na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
+        mediaSourceType === 'device'
+          ? (createdMedias.length === 1
+              ? `Mídia "${createdMedias[0].name}" salva na biblioteca! Escolha as playlists no card da mídia.`
+              : `${createdMedias.length} mídias salvas na biblioteca! Escolha as playlists no card de cada mídia.`)
+          : (createdMedias.length === 1
+              ? `Mídia "${createdMedias[0].name}" enviada e sincronizada na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
+              : `${createdMedias.length} mídias enviadas e sincronizadas na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`)
       );
 
       setMediaModalOpen(false);
@@ -5734,33 +5737,20 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                               )}
                             </div>
 
-                            {/* Details and Editable Title */}
-                            <div className="flex-1 min-w-0 space-y-1">
+                            {/* Details: Original File Name, Size, and Type */}
+                            <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-slate-500 text-[10px] font-bold">#{idx + 1}</span>
-                                <input
-                                  type="text"
-                                  value={item.name}
-                                  onChange={(e) => handleUpdateDeviceFile(item.id, { name: e.target.value })}
-                                  placeholder="Nome da mídia"
-                                  className="w-full text-xs font-semibold text-white bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-blue-500"
-                                />
+                                <span className="font-mono text-slate-500 text-[10px] font-bold shrink-0">#{idx + 1}</span>
+                                <span className="text-xs font-semibold text-white truncate block" title={item.name}>
+                                  {item.name}
+                                </span>
                               </div>
-                              <div className="flex items-center justify-between text-[10px] text-slate-400">
-                                <span className="font-mono truncate">{item.sizeFormatted} &bull; {item.isVideo ? 'Vídeo' : 'Imagem'}</span>
-                                <div className="flex items-center gap-1 shrink-0 ml-2">
-                                  <Clock className="h-3 w-3 text-slate-400" />
-                                  <input
-                                    type="number"
-                                    min={2}
-                                    max={600}
-                                    value={item.duration}
-                                    onChange={(e) => handleUpdateDeviceFile(item.id, { duration: Math.max(1, Number(e.target.value) || 10) })}
-                                    className="w-12 text-center text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white font-mono"
-                                    title="Duração em segundos"
-                                  />
-                                  <span>s</span>
-                                </div>
+                              <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-2">
+                                <span className="font-mono">{item.sizeFormatted}</span>
+                                <span>&bull;</span>
+                                <span className="px-1.5 py-0.2 rounded bg-slate-800 border border-slate-700 font-medium">
+                                  {item.isVideo ? 'Vídeo' : 'Imagem'}
+                                </span>
                               </div>
                             </div>
 
@@ -5768,7 +5758,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             <button
                               type="button"
                               onClick={() => handleRemoveDeviceFile(item.id)}
-                              className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition cursor-pointer shrink-0"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition cursor-pointer shrink-0"
                               title="Remover da fila"
                             >
                               <X className="h-4 w-4" />
@@ -5941,259 +5931,278 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 </div>
               )}
 
-              {/* TÍTULO / NOME DA MÍDIA */}
-              <div>
-                <label className="block font-semibold text-slate-300 mb-1">Título / Nome da Mídia *</label>
-                <input
-                  type="text"
-                  required
-                  value={mediaForm.name}
-                  onChange={(e) => setMediaForm({ ...mediaForm, name: e.target.value })}
-                  placeholder="Ex: Notícias Saúde G1, Banner Promoção..."
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              {/* TIPO E TEMPO */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">Tipo de Mídia *</label>
-                  <select
-                    value={mediaForm.type}
-                    onChange={(e) => {
-                      const newType = e.target.value as any;
-                      setMediaForm({
-                        ...mediaForm,
-                        type: newType,
-                        file_url:
-                          newType === 'weather_clock'
-                            ? 'widget:weather_clock'
-                            : mediaForm.file_url === 'widget:weather_clock'
-                            ? ''
-                            : mediaForm.file_url,
-                        duration: newType === 'weather_clock' ? 12 : newType === 'rss' ? 15 : mediaForm.duration,
-                      });
-                      if (newType === 'weather_clock') setMediaSourceType('weather_clock');
-                      if (newType === 'rss') setMediaSourceType('rss');
-                    }}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="image">Imagem (JPG, PNG, WEBP)</option>
-                    <option value="video">Vídeo (MP4, WebM)</option>
-                    <option value="rss">Notícias RSS (Tela Inteira)</option>
-                    <option value="weather_clock">Clima & Hora Certa</option>
-                  </select>
+              {/* INFORMATIVO PARA UPLOAD DE DISPOSITIVO */}
+              {mediaSourceType === 'device' && (
+                <div className="rounded-xl border border-blue-500/30 bg-blue-950/20 p-3.5 text-xs text-blue-200 flex items-start gap-2.5">
+                  <Info className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="font-bold text-white">Upload Direto com Nomes Originais</p>
+                    <p className="text-blue-200/90 leading-relaxed text-[11px]">
+                      Os arquivos são salvos diretamente na sua biblioteca com seus respectivos nomes originais.
+                      Após salvar, você poderá clicar no botão <strong className="text-amber-300">"Escolher Playlists"</strong> no card de cada mídia para definir as telas e o tempo de duração.
+                    </p>
+                  </div>
                 </div>
+              )}
 
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">Tempo na Tela (seg) *</label>
-                  <input
-                    type="number"
-                    min={2}
-                    max={600}
-                    required
-                    value={mediaForm.duration}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setMediaForm({ ...mediaForm, duration: v === '' ? '' : Number(v) });
-                    }}
-                    placeholder="Ex: 15"
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
+              {mediaSourceType !== 'device' && (
+                <>
+                  {/* TÍTULO / NOME DA MÍDIA */}
+                  <div>
+                    <label className="block font-semibold text-slate-300 mb-1">Título / Nome da Mídia *</label>
+                    <input
+                      type="text"
+                      required
+                      value={mediaForm.name}
+                      onChange={(e) => setMediaForm({ ...mediaForm, name: e.target.value })}
+                      placeholder="Ex: Notícias Saúde G1, Banner Promoção..."
+                      className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
 
-              {/* Exemplos Rápidos para Teste */}
-              <div className="rounded-lg bg-slate-800/60 p-2.5 border border-slate-800 text-[11px]">
-                <p className="text-slate-400 font-medium mb-1.5">Modelos Rápidos para Teste:</p>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Notícias G1 Saúde',
-                        'rss',
-                        'https://g1.globo.com/rss/g1/saude/',
-                        15
-                      )
-                    }
-                    className="bg-rose-600/90 hover:bg-rose-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
-                  >
-                    <Newspaper className="h-3 w-3" />
-                    + RSS G1 Saúde (15s)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Notícias G1 Brasil',
-                        'rss',
-                        'https://g1.globo.com/rss/g1/brasil/',
-                        15
-                      )
-                    }
-                    className="bg-rose-600/90 hover:bg-rose-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
-                  >
-                    <Newspaper className="h-3 w-3" />
-                    + RSS G1 Brasil (15s)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Hora Certa & Previsão do Tempo',
-                        'weather_clock',
-                        'widget:weather_clock',
-                        12
-                      )
-                    }
-                    className="bg-blue-600/80 hover:bg-blue-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
-                  >
-                    <CloudSun className="h-3 w-3" />
-                    + Clima & Hora Certa
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Medicamentos com Desconto',
-                        'image',
-                        'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=1200&q=80',
-                        12
-                      )
-                    }
-                    className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
-                  >
-                    + Banner Farmácia
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Dicas de Hidratação',
-                        'image',
-                        'https://images.unsplash.com/photo-1548839140-29a749e1bc4e?auto=format&fit=crop&w=1200&q=80',
-                        10
-                      )
-                    }
-                    className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
-                  >
-                    + Banner Saúde
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      addPresetMedia(
-                        'Vídeo Institucional',
-                        'video',
-                        'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-                        15
-                      )
-                    }
-                    className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
-                  >
-                    + Vídeo Exemplo
-                  </button>
-                </div>
-              </div>
-              {/* VÍNCULO DIRETO A UMA PLAYLIST OU A TODAS AS PLAYLISTS */}
-              <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-3.5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="font-bold text-indigo-300 text-xs flex items-center gap-1.5">
-                    <Film className="h-3.5 w-3.5 text-indigo-400" />
-                    <span>Vincular às Playlists da Empresa:</span>
-                  </label>
-                  {(uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__') ? (
-                    <span className="text-[10px] bg-amber-500/30 text-amber-200 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                      <Layers className="h-2.5 w-2.5 text-amber-400" />
-                      Todas as {playlists.length} playlists
-                    </span>
-                  ) : targetPlaylistIdForNewMedia ? (
-                    <span className="text-[10px] bg-indigo-600/50 text-indigo-200 px-2 py-0.5 rounded-full font-bold">
-                      Auto-inclusão ativa
-                    </span>
-                  ) : null}
-                </div>
+                  {/* TIPO E TEMPO */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-slate-300 mb-1">Tipo de Mídia *</label>
+                      <select
+                        value={mediaForm.type}
+                        onChange={(e) => {
+                          const newType = e.target.value as any;
+                          setMediaForm({
+                            ...mediaForm,
+                            type: newType,
+                            file_url:
+                              newType === 'weather_clock'
+                                ? 'widget:weather_clock'
+                                : mediaForm.file_url === 'widget:weather_clock'
+                                ? ''
+                                : mediaForm.file_url,
+                            duration: newType === 'weather_clock' ? 12 : newType === 'rss' ? 15 : mediaForm.duration,
+                          });
+                          if (newType === 'weather_clock') setMediaSourceType('weather_clock');
+                          if (newType === 'rss') setMediaSourceType('rss');
+                        }}
+                        className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="image">Imagem (JPG, PNG, WEBP)</option>
+                        <option value="video">Vídeo (MP4, WebM)</option>
+                        <option value="rss">Notícias RSS (Tela Inteira)</option>
+                        <option value="weather_clock">Clima & Hora Certa</option>
+                      </select>
+                    </div>
 
-                {/* Seletor de Playlists com Checkers */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-300">
-                      Selecione em quais playlists incluir:
-                    </span>
-                    <div className="flex items-center gap-2 text-[11px]">
+                    <div>
+                      <label className="block font-semibold text-slate-300 mb-1">Tempo na Tela (seg) *</label>
+                      <input
+                        type="number"
+                        min={2}
+                        max={600}
+                        required
+                        value={mediaForm.duration}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setMediaForm({ ...mediaForm, duration: v === '' ? '' : Number(v) });
+                        }}
+                        placeholder="Ex: 15"
+                        className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Exemplos Rápidos para Teste */}
+                  <div className="rounded-lg bg-slate-800/60 p-2.5 border border-slate-800 text-[11px]">
+                    <p className="text-slate-400 font-medium mb-1.5">Modelos Rápidos para Teste:</p>
+                    <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
-                        onClick={() => {
-                          setTargetPlaylistIdsForNewMedia(playlists.map((p) => p.id));
-                          setUploadToAllPlaylists(true);
-                        }}
-                        className="text-amber-400 hover:text-amber-300 font-semibold cursor-pointer underline"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Notícias G1 Saúde',
+                            'rss',
+                            'https://g1.globo.com/rss/g1/saude/',
+                            15
+                          )
+                        }
+                        className="bg-rose-600/90 hover:bg-rose-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
                       >
-                        Marcar Todas
+                        <Newspaper className="h-3 w-3" />
+                        + RSS G1 Saúde (15s)
                       </button>
-                      <span className="text-slate-600">&bull;</span>
                       <button
                         type="button"
-                        onClick={() => {
-                          setTargetPlaylistIdsForNewMedia([]);
-                          setUploadToAllPlaylists(false);
-                          setTargetPlaylistIdForNewMedia('');
-                        }}
-                        className="text-slate-400 hover:text-slate-300 font-semibold cursor-pointer underline"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Notícias G1 Brasil',
+                            'rss',
+                            'https://g1.globo.com/rss/g1/brasil/',
+                            15
+                          )
+                        }
+                        className="bg-rose-600/90 hover:bg-rose-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
                       >
-                        Desmarcar
+                        <Newspaper className="h-3 w-3" />
+                        + RSS G1 Brasil (15s)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Hora Certa & Previsão do Tempo',
+                            'weather_clock',
+                            'widget:weather_clock',
+                            12
+                          )
+                        }
+                        className="bg-blue-600/80 hover:bg-blue-600 text-white font-medium px-2 py-1 rounded transition cursor-pointer flex items-center gap-1"
+                      >
+                        <CloudSun className="h-3 w-3" />
+                        + Clima & Hora Certa
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Medicamentos com Desconto',
+                            'image',
+                            'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=1200&q=80',
+                            12
+                          )
+                        }
+                        className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
+                      >
+                        + Banner Farmácia
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Dicas de Hidratação',
+                            'image',
+                            'https://images.unsplash.com/photo-1548839140-29a749e1bc4e?auto=format&fit=crop&w=1200&q=80',
+                            10
+                          )
+                        }
+                        className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
+                      >
+                        + Banner Saúde
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          addPresetMedia(
+                            'Vídeo Institucional',
+                            'video',
+                            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
+                            15
+                          )
+                        }
+                        className="bg-slate-700 px-2 py-1 rounded text-slate-200 hover:bg-slate-600 transition cursor-pointer"
+                      >
+                        + Vídeo Exemplo
                       </button>
                     </div>
                   </div>
 
-                  <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
-                    {playlists.map((pl) => {
-                      const isChecked =
-                        uploadToAllPlaylists ||
-                        targetPlaylistIdsForNewMedia.includes(pl.id) ||
-                        targetPlaylistIdForNewMedia === pl.id ||
-                        targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__';
-                      return (
-                        <div
-                          key={pl.id}
-                          onClick={() => {
-                            if (uploadToAllPlaylists) {
+                  {/* VÍNCULO DIRETO A UMA PLAYLIST OU A TODAS AS PLAYLISTS */}
+                  <div className="rounded-xl border border-indigo-500/40 bg-indigo-950/20 p-3.5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-indigo-300 text-xs flex items-center gap-1.5">
+                        <Film className="h-3.5 w-3.5 text-indigo-400" />
+                        <span>Vincular às Playlists da Empresa:</span>
+                      </label>
+                      {(uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__') ? (
+                        <span className="text-[10px] bg-amber-500/30 text-amber-200 border border-amber-500/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                          <Layers className="h-2.5 w-2.5 text-amber-400" />
+                          Todas as {playlists.length} playlists
+                        </span>
+                      ) : targetPlaylistIdForNewMedia ? (
+                        <span className="text-[10px] bg-indigo-600/50 text-indigo-200 px-2 py-0.5 rounded-full font-bold">
+                          Auto-inclusão ativa
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {/* Seletor de Playlists com Checkers */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-slate-300">
+                          Selecione em quais playlists incluir:
+                        </span>
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTargetPlaylistIdsForNewMedia(playlists.map((p) => p.id));
+                              setUploadToAllPlaylists(true);
+                            }}
+                            className="text-amber-400 hover:text-amber-300 font-semibold cursor-pointer underline"
+                          >
+                            Marcar Todas
+                          </button>
+                          <span className="text-slate-600">&bull;</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTargetPlaylistIdsForNewMedia([]);
                               setUploadToAllPlaylists(false);
-                              setTargetPlaylistIdsForNewMedia(playlists.filter((p) => p.id !== pl.id).map((p) => p.id));
-                            } else {
-                              setTargetPlaylistIdsForNewMedia((prev) =>
-                                prev.includes(pl.id) ? prev.filter((id) => id !== pl.id) : [...prev, pl.id]
-                              );
-                            }
-                          }}
-                          className={`flex items-center justify-between p-2 rounded-lg border transition cursor-pointer text-xs ${
-                            isChecked
-                              ? 'bg-indigo-950/40 border-indigo-500/70 text-white'
-                              : 'bg-slate-800/80 border-slate-700 text-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => {}}
-                              className="h-4 w-4 rounded border-slate-600 text-indigo-500 focus:ring-indigo-400 cursor-pointer shrink-0"
-                            />
-                            <span className="font-semibold truncate">{pl.name}</span>
-                            {pl.store_name && (
-                              <span className="text-[10px] text-slate-400 truncate">({pl.store_name})</span>
-                            )}
-                          </div>
-                          <span className="text-[10px] text-slate-400 shrink-0 font-mono">
-                            {pl.items?.length || 0} mídias
-                          </span>
+                              setTargetPlaylistIdForNewMedia('');
+                            }}
+                            className="text-slate-400 hover:text-slate-300 font-semibold cursor-pointer underline"
+                          >
+                            Desmarcar
+                          </button>
                         </div>
-                      );
-                    })}
+                      </div>
+
+                      <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
+                        {playlists.map((pl) => {
+                          const isChecked =
+                            uploadToAllPlaylists ||
+                            targetPlaylistIdsForNewMedia.includes(pl.id) ||
+                            targetPlaylistIdForNewMedia === pl.id ||
+                            targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__';
+                          return (
+                            <div
+                              key={pl.id}
+                              onClick={() => {
+                                if (uploadToAllPlaylists) {
+                                  setUploadToAllPlaylists(false);
+                                  setTargetPlaylistIdsForNewMedia(playlists.filter((p) => p.id !== pl.id).map((p) => p.id));
+                                } else {
+                                  setTargetPlaylistIdsForNewMedia((prev) =>
+                                    prev.includes(pl.id) ? prev.filter((id) => id !== pl.id) : [...prev, pl.id]
+                                  );
+                                }
+                              }}
+                              className={`flex items-center justify-between p-2 rounded-lg border transition cursor-pointer text-xs ${
+                                isChecked
+                                  ? 'bg-indigo-950/40 border-indigo-500/70 text-white'
+                                  : 'bg-slate-800/80 border-slate-700 text-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => {}}
+                                  className="h-4 w-4 rounded border-slate-600 text-indigo-500 focus:ring-indigo-400 cursor-pointer shrink-0"
+                                />
+                                <span className="font-semibold truncate">{pl.name}</span>
+                                {pl.store_name && (
+                                  <span className="text-[10px] text-slate-400 truncate">({pl.store_name})</span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-slate-400 shrink-0 font-mono">
+                                {pl.items?.length || 0} mídias
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
+                </>
+              )}
               </div>
 
               {/* Sticky Footer */}
@@ -6217,54 +6226,85 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   >
                     Cancelar
                   </button>
-                  <button
-                    type="button"
-                    disabled={
-                      isUploadingMedia ||
-                      mediaList.length >= effectiveMaxMedia ||
-                      (mediaSourceType === 'device' && selectedDeviceFiles.length === 0 && !mediaForm.file_url) ||
-                      (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
-                      (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
-                    }
-                    onClick={(e) => handleSaveMedia(e, true)}
-                    className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
-                    title="Faz o upload da mídia, salva na playlist e envia o comando para as telas reiniciarem imediatamente"
-                  >
-                    {isUploadingMedia ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        <span>{uploadProgressStatus || `Enviando... ${uploadProgress}%`}</span>
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        <span>Salvar e Reiniciar Telas</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={
-                      isUploadingMedia ||
-                      mediaList.length >= effectiveMaxMedia ||
-                      (mediaSourceType === 'device' && !selectedDeviceFile && !mediaForm.file_url) ||
-                      (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
-                      (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
-                    }
-                    className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-xs font-semibold text-white hover:bg-blue-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                  >
-                    {isUploadingMedia ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        <span>Enviando... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
-                      </>
-                    ) : (
-                      <>
-                        <UploadCloud className="h-3.5 w-3.5" />
-                        <span>Salvar Apenas</span>
-                      </>
-                    )}
-                  </button>
+
+                  {mediaSourceType === 'device' ? (
+                    <button
+                      type="submit"
+                      disabled={
+                        isUploadingMedia ||
+                        mediaList.length >= effectiveMaxMedia ||
+                        selectedDeviceFiles.length === 0
+                      }
+                      className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg bg-blue-600 text-xs font-bold text-white hover:bg-blue-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-md transition"
+                    >
+                      {isUploadingMedia ? (
+                        <>
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          <span>{uploadProgressStatus || `Carregando... ${uploadProgress}%`}</span>
+                        </>
+                      ) : (
+                        <>
+                          <UploadCloud className="h-4 w-4" />
+                          <span>
+                            {selectedDeviceFiles.length > 1
+                              ? `Carregar ${selectedDeviceFiles.length} Mídias`
+                              : selectedDeviceFiles.length === 1
+                              ? `Carregar 1 Mídia`
+                              : `Carregar Mídia`}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={
+                          isUploadingMedia ||
+                          mediaList.length >= effectiveMaxMedia ||
+                          (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
+                          (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
+                        }
+                        onClick={(e) => handleSaveMedia(e, true)}
+                        className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+                        title="Faz o upload da mídia, salva na playlist e envia o comando para as telas reiniciarem imediatamente"
+                      >
+                        {isUploadingMedia ? (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            <span>{uploadProgressStatus || `Enviando... ${uploadProgress}%`}</span>
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            <span>Salvar e Reiniciar Telas</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={
+                          isUploadingMedia ||
+                          mediaList.length >= effectiveMaxMedia ||
+                          (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
+                          (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
+                        }
+                        className="flex-1 sm:flex-initial min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-xs font-semibold text-white hover:bg-blue-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                      >
+                        {isUploadingMedia ? (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            <span>Enviando... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
+                          </>
+                        ) : (
+                          <>
+                            <UploadCloud className="h-3.5 w-3.5" />
+                            <span>Salvar Apenas</span>
+                          </>
+                        )}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </form>
