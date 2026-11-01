@@ -16,6 +16,7 @@ import {
   Plus,
   Radio,
   HardDrive,
+  CheckSquare,
 } from 'lucide-react';
 import { Media } from '../types';
 import { WeatherClockMedia } from './WeatherClockMedia';
@@ -26,6 +27,7 @@ interface MediaPreviewModalProps {
   media: Media | null;
   onClose: () => void;
   onAddToPlaylist?: (media: Media) => void;
+  onChoosePlaylists?: (media: Media) => void;
   isAlreadyInPlaylist?: boolean;
 }
 
@@ -33,6 +35,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   media,
   onClose,
   onAddToPlaylist,
+  onChoosePlaylists,
   isAlreadyInPlaylist = false,
 }) => {
   if (!media) return null;
@@ -91,7 +94,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             {Boolean(media.drive_file_id || media.drive_view_url || media.source === 'drive') && (
               <span className="shrink-0 rounded px-2 py-0.5 text-[10px] font-bold uppercase bg-blue-950/80 border border-blue-700 text-blue-300 flex items-center gap-1 shadow-xs">
                 <HardDrive className="h-3 w-3 text-blue-400" />
-                Google Drive
+                Nuvem
               </span>
             )}
             <h3 className="text-sm sm:text-base font-bold text-white truncate" title={media.name}>
@@ -106,12 +109,11 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 font-bold px-3 py-1.5 rounded-lg shadow-sm transition"
-                title="Abrir arquivo diretamente no Google Drive"
+                title="Abrir arquivo em tamanho original"
               >
-                <HardDrive className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Ver no Google Drive</span>
-                <span className="sm:hidden">Drive</span>
-                <ExternalLink className="h-3 w-3 opacity-80" />
+                <ExternalLink className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Abrir Mídia</span>
+                <span className="sm:hidden">Abrir</span>
               </a>
             )}
             {media.file_url && !media.file_url.startsWith('widget:') && (
@@ -300,7 +302,22 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-2 sm:flex sm:items-center justify-end gap-2 w-full sm:w-auto">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center justify-end gap-2 w-full sm:w-auto">
+            {onChoosePlaylists && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onChoosePlaylists(media);
+                }}
+                className="w-full sm:w-auto justify-center min-h-[40px] px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs flex items-center gap-2 transition cursor-pointer shadow-md text-center"
+                title="Escolher em quais playlists esta mídia será exibida e definir duração"
+              >
+                <CheckSquare className="h-4 w-4 text-amber-200 shrink-0" />
+                <span>Escolher Playlists</span>
+              </button>
+            )}
+
             {onAddToPlaylist && (
               <button
                 type="button"

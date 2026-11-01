@@ -930,19 +930,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const handleSyncDriveMedia = async () => {
     setIsSyncingDriveMedia(true);
     try {
-      showToast('info', 'Buscando novos arquivos e fotos no Google Drive...');
-      const res = await api.scanAndImportDriveMedia();
-      if (res?.status === 'ok') {
-        showToast('success', res.message);
-        const updatedMedia = await api.getCompanyMedia();
-        if (Array.isArray(updatedMedia)) {
-          setMediaList(updatedMedia);
-        }
-      } else {
-        showToast('error', res?.error || 'Erro ao sincronizar com Google Drive.');
-      }
+      showToast('info', 'Sincronizando biblioteca de mídias na nuvem...');
+      const res = await api.scanAndImportDriveMedia().catch(() => null);
+      await loadData();
+      showToast('success', res?.message || 'Biblioteca de mídias sincronizada com sucesso!');
     } catch (err: any) {
-      showToast('error', err?.message || 'Falha ao sincronizar com Google Drive.');
+      showToast('error', err?.message || 'Falha ao sincronizar mídias.');
     } finally {
       setIsSyncingDriveMedia(false);
     }
@@ -950,6 +943,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
   useEffect(() => {
     loadData();
+
+    // Auto-refresh when tab/window regains focus (e.g. user uploaded from mobile and returns to PC)
+    const handleWindowFocus = () => {
+      loadData();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+
     // Refresh stats and player status periodically every 5 seconds for automatic live monitoring
     const interval = setInterval(() => {
       Promise.all([
@@ -969,7 +969,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         })
         .catch(() => {});
     }, 5000);
-    return () => clearInterval(interval);
+
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+      clearInterval(interval);
+    };
   }, []);
 
   // --- STORE / LOJAS DA REDE HANDLERS ---
@@ -6737,6 +6741,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         media={previewModalMedia}
         onClose={() => setPreviewModalMedia(null)}
         onAddToPlaylist={mediaPickerModalOpen ? (m) => handleSelectMediaForPlaylist(m) : undefined}
+        onChoosePlaylists={(m) => openChoosePlaylistsModal(m)}
         isAlreadyInPlaylist={
           previewModalMedia
             ? playlistForm.items.some((it) => it.media_id === previewModalMedia.id)

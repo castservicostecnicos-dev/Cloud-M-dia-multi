@@ -273,8 +273,8 @@ export async function saveMediaBinaryToFirestore(
   const db = getFirestoreDb();
   if (!db) return false;
 
-  // Limit Firestore binary chunking to files <= 15 MB (larger videos rely on Google Drive or disk)
-  if (buffer.length > 15 * 1024 * 1024) {
+  // Limit Firestore binary chunking to files <= 35 MB (larger videos rely on Google Drive or disk)
+  if (buffer.length > 35 * 1024 * 1024) {
     return false;
   }
 
