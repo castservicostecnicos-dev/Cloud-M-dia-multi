@@ -58,6 +58,7 @@ import {
   Palette,
   Info,
   Cloud,
+  CheckSquare,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { CompanyStats, CompanyStore, Player, Operator, Playlist, Media, RssFeed, Company, MediaIntegrityAuditReport, MediaIntegrityItemResult, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog, PlaylistItem } from '../types';
@@ -67,6 +68,7 @@ import { MediaPreviewModal } from '../components/MediaPreviewModal';
 import { PlayerDiagnosticView, DiagnosticPlayerData } from '../components/PlayerDiagnosticView';
 import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
 import { resolveMediaDisplayUrl, getCachedToken, setCachedAccessToken, initAuth, googleSignIn, setManualDriveToken, isRealOAuthToken } from '../lib/googleDrive';
+import { registerBackHandler } from '../lib/backNavigation';
 
 interface CompanyDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -537,41 +539,121 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [mediaPickerFilter, setMediaPickerFilter] = useState<'all' | 'image' | 'video' | 'rss' | 'weather_clock'>('all');
   const [mediaPickerSearch, setMediaPickerSearch] = useState('');
   const [targetPlaylistIdForNewMedia, setTargetPlaylistIdForNewMedia] = useState<string>('');
+  const [targetPlaylistIdsForNewMedia, setTargetPlaylistIdsForNewMedia] = useState<string[]>([]);
   const [uploadToAllPlaylists, setUploadToAllPlaylists] = useState<boolean>(false);
 
-  // Modal para carregar mídia existente em todas as playlists de uma só vez
-  const [addToAllPlaylistsModalMedia, setAddToAllPlaylistsModalMedia] = useState<Media | null>(null);
-  const [isAddingToAllPlaylists, setIsAddingToAllPlaylists] = useState(false);
-  const [addToAllPlaylistsDuration, setAddToAllPlaylistsDuration] = useState<number>(10);
-  const [addToAllPlaylistsRestart, setAddToAllPlaylistsRestart] = useState<boolean>(true);
-  const [addToAllPlaylistsDuplicate, setAddToAllPlaylistsDuplicate] = useState<boolean>(false);
+  // Modal para escolher em quais playlists a mídia será vinculada com checkers
+  const [choosePlaylistsModalMedia, setChoosePlaylistsModalMedia] = useState<Media | null>(null);
+  const [selectedPlaylistIdsForMedia, setSelectedPlaylistIdsForMedia] = useState<string[]>([]);
+  const [isAddingToPlaylists, setIsAddingToPlaylists] = useState(false);
+  const [choosePlaylistsDuration, setChoosePlaylistsDuration] = useState<number>(10);
+  const [choosePlaylistsRestart, setChoosePlaylistsRestart] = useState<boolean>(true);
+  const [choosePlaylistsDuplicate, setChoosePlaylistsDuplicate] = useState<boolean>(false);
+
+  // Backwards compatible aliases
+  const addToAllPlaylistsModalMedia = choosePlaylistsModalMedia;
+  const setAddToAllPlaylistsModalMedia = setChoosePlaylistsModalMedia;
+  const isAddingToAllPlaylists = isAddingToPlaylists;
+
+  const openChoosePlaylistsModal = (media: Media) => {
+    setChoosePlaylistsModalMedia(media);
+    setChoosePlaylistsDuration(Number(media.duration) || 10);
+    setChoosePlaylistsRestart(true);
+    setChoosePlaylistsDuplicate(false);
+    // Pre-selecionar playlists que já possuem esta mídia
+    const memberIds = playlists
+      .filter((pl) => pl.items && pl.items.some((it) => it.media_id === media.id))
+      .map((pl) => pl.id);
+    setSelectedPlaylistIdsForMedia(memberIds.length > 0 ? memberIds : playlists.map((p) => p.id));
+  };
 
   const openAddToAllPlaylistsModal = (media: Media) => {
-    setAddToAllPlaylistsModalMedia(media);
-    setAddToAllPlaylistsDuration(Number(media.duration) || 10);
-    setAddToAllPlaylistsRestart(true);
-    setAddToAllPlaylistsDuplicate(false);
+    openChoosePlaylistsModal(media);
   };
 
-  const handleConfirmAddToAllPlaylists = async () => {
-    if (!addToAllPlaylistsModalMedia) return;
-    try {
-      setIsAddingToAllPlaylists(true);
-      const res = await api.addMediaToAllPlaylists(addToAllPlaylistsModalMedia.id, {
-        duration: Number(addToAllPlaylistsDuration) || 10,
-        restartPlayers: addToAllPlaylistsRestart,
-        forceDuplicate: addToAllPlaylistsDuplicate,
-      });
+  const handleTogglePlaylistSelectionForMedia = (playlistId: string) => {
+    setSelectedPlaylistIdsForMedia((prev) =>
+      prev.includes(playlistId) ? prev.filter((id) => id !== playlistId) : [...prev, playlistId]
+    );
+  };
 
-      showToast('success', res.message || `Mídia "${addToAllPlaylistsModalMedia.name}" vinculada a todas as playlists com sucesso!`);
-      setAddToAllPlaylistsModalMedia(null);
+  const handleSelectAllPlaylistsForMedia = () => {
+    setSelectedPlaylistIdsForMedia(playlists.map((p) => p.id));
+  };
+
+  const handleDeselectAllPlaylistsForMedia = () => {
+    setSelectedPlaylistIdsForMedia([]);
+  };
+
+  const handleConfirmChoosePlaylists = async () => {
+    if (!choosePlaylistsModalMedia) return;
+    try {
+      setIsAddingToPlaylists(true);
+      const media = choosePlaylistsModalMedia;
+      const nowStr = new Date().toISOString();
+      let affectedCount = 0;
+
+      for (const pl of playlists) {
+        const isSelected = selectedPlaylistIdsForMedia.includes(pl.id);
+        const alreadyHas = pl.items && pl.items.some((it) => it.media_id === media.id);
+
+        if (isSelected) {
+          if (!alreadyHas || choosePlaylistsDuplicate) {
+            const newItem: PlaylistItem = {
+              id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              playlist_id: pl.id,
+              media_id: media.id,
+              position: (pl.items?.length || 0) + 1,
+              duration: Number(choosePlaylistsDuration) || Number(media.duration) || 10,
+              name: media.name,
+              type: media.type,
+              file_url: media.file_url,
+              created_at: nowStr,
+            };
+            const updatedItems = [...(pl.items || []), newItem].map((it, idx) => ({ ...it, position: idx + 1 }));
+            await api.updateCompanyPlaylist(pl.id, {
+              ...pl,
+              items: updatedItems,
+              restartPlayers: false,
+            });
+            affectedCount++;
+          }
+        } else {
+          // Desmarcada: remove da playlist se estiver presente para refletir com precisão a escolha
+          if (alreadyHas) {
+            const updatedItems = (pl.items || [])
+              .filter((it) => it.media_id !== media.id)
+              .map((it, idx) => ({ ...it, position: idx + 1 }));
+            await api.updateCompanyPlaylist(pl.id, {
+              ...pl,
+              items: updatedItems,
+              restartPlayers: false,
+            });
+            affectedCount++;
+          }
+        }
+      }
+
+      if (choosePlaylistsRestart && selectedPlaylistIdsForMedia.length > 0) {
+        await handleRestartPlayers({
+          playlistName: `Mídia "${media.name}" sincronizada`,
+        });
+      }
+
+      showToast(
+        'success',
+        `Mídia "${media.name}" salva com sucesso em ${selectedPlaylistIdsForMedia.length} playlist(s)!`
+      );
+      setChoosePlaylistsModalMedia(null);
       await loadData();
     } catch (err: any) {
-      showToast('error', err.message || 'Erro ao carregar mídia para todas as playlists.');
+      showToast('error', err.message || 'Erro ao vincular mídia às playlists.');
     } finally {
-      setIsAddingToAllPlaylists(false);
+      setIsAddingToPlaylists(false);
     }
   };
+
+  const handleConfirmAddToAllPlaylists = handleConfirmChoosePlaylists;
 
   const [mediaForm, setMediaForm] = useState<{
     name: string;
@@ -589,16 +671,32 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     'device' | 'url' | 'rss' | 'weather_clock'
   >('device');
 
-  const [selectedDeviceFile, setSelectedDeviceFile] = useState<{
-    file: File | null;
+  // Interface para fila de múltiplos arquivos
+  interface QueuedDeviceFile {
+    id: string;
+    file: File;
     dataUrl: string;
     name: string;
     sizeFormatted: string;
     type: string;
     isVideo: boolean;
-  } | null>(null);
+    duration: number;
+  }
+
+  const [selectedDeviceFiles, setSelectedDeviceFiles] = useState<QueuedDeviceFile[]>([]);
+  // Mantemos selectedDeviceFile como primeiro item da fila para compatibilidade
+  const selectedDeviceFile = selectedDeviceFiles.length > 0 ? selectedDeviceFiles[0] : null;
+  const setSelectedDeviceFile = (item: any) => {
+    if (!item) {
+      setSelectedDeviceFiles([]);
+    } else if (item.file) {
+      setSelectedDeviceFiles([item]);
+    }
+  };
+
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadProgressStatus, setUploadProgressStatus] = useState<string>('');
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -610,6 +708,16 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
+  const handleRemoveDeviceFile = (id: string) => {
+    setSelectedDeviceFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  const handleUpdateDeviceFile = (id: string, updates: Partial<QueuedDeviceFile>) => {
+    setSelectedDeviceFiles((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, ...updates } : f))
+    );
+  };
+
   const resetMediaModalState = (preselectedPlaylistId?: string) => {
     setMediaForm({
       name: '',
@@ -618,16 +726,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       duration: 10,
     });
     setMediaSourceType('device');
-    setSelectedDeviceFile(null);
+    setSelectedDeviceFiles([]);
     setIsUploadingMedia(false);
     setUploadProgress(0);
+    setUploadProgressStatus('');
     setIsDraggingFile(false);
     setUploadToAllPlaylists(false);
-    setTargetPlaylistIdForNewMedia(
+    const initialPlId =
       preselectedPlaylistId !== undefined
         ? preselectedPlaylistId
-        : (editingPlaylist ? editingPlaylist.id : '')
-    );
+        : (editingPlaylist ? editingPlaylist.id : '');
+    setTargetPlaylistIdForNewMedia(initialPlId);
+    setTargetPlaylistIdsForNewMedia(initialPlId ? [initialPlId] : []);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -637,6 +747,107 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     name: '',
     url: '',
   });
+
+  // Interceptação e controle da tecla Voltar do dispositivo móvel / Android
+  useEffect(() => {
+    return registerBackHandler(() => {
+      // 1. Modais em ordem de profundidade / prioridade
+      if (previewModalMedia) {
+        setPreviewModalMedia(null);
+        return true;
+      }
+      if (choosePlaylistsModalMedia) {
+        setChoosePlaylistsModalMedia(null);
+        return true;
+      }
+      if (confirmData.isOpen) {
+        setConfirmData((p) => ({ ...p, isOpen: false }));
+        return true;
+      }
+      if (mediaPickerModalOpen) {
+        setMediaPickerModalOpen(false);
+        return true;
+      }
+      if (mediaModalOpen) {
+        setMediaModalOpen(false);
+        return true;
+      }
+      if (playlistModalOpen) {
+        setPlaylistModalOpen(false);
+        return true;
+      }
+      if (rssQuickPickerOpen) {
+        setRssQuickPickerOpen(false);
+        return true;
+      }
+      if (playlistTargetModal.isOpen) {
+        setPlaylistTargetModal({ isOpen: false, type: 'rss' });
+        return true;
+      }
+      if (playerDirectLinkModal.isOpen) {
+        setPlayerDirectLinkModal({ isOpen: false, player: null });
+        return true;
+      }
+      if (resetPasswordData.isOpen) {
+        setResetPasswordData((p) => ({ ...p, isOpen: false }));
+        return true;
+      }
+      if (diagnosticModalPlayer) {
+        setDiagnosticModalPlayer(null);
+        return true;
+      }
+      if (storeModalOpen) {
+        setStoreModalOpen(false);
+        return true;
+      }
+      if (playerModalOpen) {
+        setPlayerModalOpen(false);
+        return true;
+      }
+      if (operatorModalOpen) {
+        setOperatorModalOpen(false);
+        return true;
+      }
+      if (rssModalOpen) {
+        setRssModalOpen(false);
+        return true;
+      }
+      if (r2ModalOpen) {
+        setR2ModalOpen(false);
+        return true;
+      }
+      if (driveTokenModalOpen) {
+        setDriveTokenModalOpen(false);
+        return true;
+      }
+      // 2. Se nenhuma janela modal estiver aberta, voltar para o painel principal (dashboard)
+      if (activeTab !== 'dashboard') {
+        setActiveTab('dashboard');
+        return true;
+      }
+      // 3. Estando na tela inicial sem modais, retorna false para o App.tsx exibir a pergunta de saída
+      return false;
+    });
+  }, [
+    previewModalMedia,
+    choosePlaylistsModalMedia,
+    confirmData.isOpen,
+    mediaPickerModalOpen,
+    mediaModalOpen,
+    playlistModalOpen,
+    rssQuickPickerOpen,
+    playlistTargetModal.isOpen,
+    playerDirectLinkModal.isOpen,
+    resetPasswordData.isOpen,
+    diagnosticModalPlayer,
+    storeModalOpen,
+    playerModalOpen,
+    operatorModalOpen,
+    rssModalOpen,
+    r2ModalOpen,
+    driveTokenModalOpen,
+    activeTab,
+  ]);
 
   const loadData = async () => {
     try {
@@ -1450,54 +1661,73 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   };
 
   // --- MEDIA HANDLERS ---
+  // --- MEDIA HANDLERS ---
+  const handleProcessDeviceFiles = (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    const newItems: QueuedDeviceFile[] = [];
+    for (const file of list) {
+      if (file.size > 200 * 1024 * 1024) {
+        showToast('error', `O arquivo "${file.name}" é muito grande. O limite máximo é de 200 MB.`);
+        continue;
+      }
+
+      const isVideo =
+        file.type.startsWith('video/') ||
+        /\.(mp4|webm|mov|ogg|ogv|mkv|avi|m4v|3gp|mpeg|mpg)$/i.test(file.name);
+      const isImage =
+        file.type.startsWith('image/') ||
+        /\.(jpg|jpeg|png|webp|gif|svg|bmp|avif|heic|heif|jfif)$/i.test(file.name) ||
+        !isVideo;
+
+      if (!isVideo && !isImage) {
+        showToast('error', `O arquivo "${file.name}" não é suportado. Escolha imagens ou vídeos.`);
+        continue;
+      }
+
+      const previewUrl = URL.createObjectURL(file);
+      const autoTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ').trim() || file.name;
+
+      newItems.push({
+        id: `qf-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        file,
+        dataUrl: previewUrl,
+        name: autoTitle,
+        sizeFormatted: formatFileSize(file.size),
+        type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+        isVideo,
+        duration: isVideo ? 15 : 10,
+      });
+    }
+
+    if (newItems.length > 0) {
+      setSelectedDeviceFiles((prev) => [...prev, ...newItems]);
+      if (newItems.length === 1 && !mediaForm.name.trim()) {
+        setMediaForm((prev) => ({
+          ...prev,
+          name: newItems[0].name,
+          type: newItems[0].isVideo ? 'video' : 'image',
+          duration: newItems[0].duration,
+        }));
+      }
+    }
+  };
+
   const handleProcessDeviceFile = (file: File) => {
-    if (file.size > 200 * 1024 * 1024) {
-      showToast('error', 'O arquivo é muito grande. O limite máximo é de 200 MB.');
-      return;
-    }
-
-    const isVideo =
-      file.type.startsWith('video/') ||
-      /\.(mp4|webm|mov|ogg|ogv|mkv|avi|m4v|3gp|mpeg|mpg)$/i.test(file.name);
-    const isImage =
-      file.type.startsWith('image/') ||
-      /\.(jpg|jpeg|png|webp|gif|svg|bmp|avif|heic|heif|jfif)$/i.test(file.name) ||
-      !isVideo;
-
-    if (!isVideo && !isImage) {
-      showToast('error', 'Formato não suportado. Escolha uma imagem (JPG, PNG, WEBP, GIF) ou vídeo (MP4, WebM, MOV).');
-      return;
-    }
-
-    const previewUrl = URL.createObjectURL(file);
-    const autoTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ').trim() || file.name;
-
-    setSelectedDeviceFile({
-      file,
-      dataUrl: previewUrl,
-      name: file.name,
-      sizeFormatted: formatFileSize(file.size),
-      type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
-      isVideo,
-    });
-
-    setMediaForm((prev) => ({
-      ...prev,
-      name: prev.name.trim() === '' ? autoTitle : prev.name,
-      type: isVideo ? 'video' : 'image',
-      duration: isVideo ? 15 : prev.duration || 10,
-    }));
+    handleProcessDeviceFiles([file]);
   };
 
   const handleSaveMedia = async (e: React.FormEvent, andRestart = false) => {
     e.preventDefault();
 
+    const countToAdd = mediaSourceType === 'device' ? Math.max(1, selectedDeviceFiles.length) : 1;
     const currentMediaCount = mediaList.length;
     const maxMediaLimit = effectiveMaxMedia;
-    if (currentMediaCount >= maxMediaLimit) {
+    if (currentMediaCount + countToAdd > maxMediaLimit) {
       showToast(
         'error',
-        `Limite de mídias atingido para seu plano (${currentMediaCount}/${maxMediaLimit}). Remova mídias obsoletas ou solicite aumento de cota ao administrador.`
+        `Esta operação ultrapassará o limite de mídias (${currentMediaCount + countToAdd}/${maxMediaLimit}). Remova mídias antigas para continuar.`
       );
       return;
     }
@@ -1505,25 +1735,31 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     try {
       setIsUploadingMedia(true);
       setUploadProgress(5);
-      let targetFileUrl = mediaForm.file_url;
-      let createdMedia: Media | null = null;
-      let mediaTitle = mediaForm.name.trim();
+      setUploadProgressStatus('Preparando envio...');
+      const createdMedias: Media[] = [];
+
+      // Determinar quais playlists devem receber a nova mídia
       const isTargetAllPlaylists =
-        uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__';
+        uploadToAllPlaylists ||
+        targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
+        (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
+
+      const targetPlIds = isTargetAllPlaylists
+        ? playlists.map((p) => p.id)
+        : targetPlaylistIdsForNewMedia.length > 0
+        ? targetPlaylistIdsForNewMedia
+        : targetPlaylistIdForNewMedia
+        ? [targetPlaylistIdForNewMedia]
+        : (editingPlaylist ? [editingPlaylist.id] : []);
 
       if (mediaSourceType === 'device') {
-        if (!selectedDeviceFile) {
-          showToast('error', 'Por favor, selecione um arquivo de mídia do seu dispositivo.');
+        if (selectedDeviceFiles.length === 0) {
+          showToast('error', 'Por favor, selecione ao menos um arquivo de mídia do seu dispositivo.');
           setIsUploadingMedia(false);
           return;
         }
 
-        mediaTitle =
-          mediaForm.name.trim() ||
-          selectedDeviceFile.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ').trim() ||
-          selectedDeviceFile.name;
-
-        let uploadRes;
+        const totalFiles = selectedDeviceFiles.length;
         const currentToken =
           getCachedToken() ||
           (typeof localStorage !== 'undefined'
@@ -1532,179 +1768,150 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             : undefined) ||
           undefined;
 
-        if (selectedDeviceFile.file) {
-          uploadRes = await api.uploadCompanyMediaFileChunked({
-            file: selectedDeviceFile.file,
-            name: mediaTitle,
-            duration: Number(mediaForm.duration) || (selectedDeviceFile.isVideo ? 15 : 10),
-            addToAllPlaylists: isTargetAllPlaylists,
-            clientDriveToken: currentToken,
-            onProgress: (pct) => setUploadProgress(pct),
-          });
-        } else {
-          uploadRes = await api.uploadCompanyMediaToDriveServer({
-            fileData: selectedDeviceFile.dataUrl,
-            filename: selectedDeviceFile.name,
-            mimeType: selectedDeviceFile.type,
-            name: mediaTitle,
-            duration: Number(mediaForm.duration) || 10,
-            addToAllPlaylists: isTargetAllPlaylists,
-            clientDriveToken: currentToken,
-          });
-        }
+        for (let i = 0; i < totalFiles; i++) {
+          const fileItem = selectedDeviceFiles[i];
+          const fileTitle = fileItem.name.trim() || `Mídia ${i + 1}`;
+          setUploadProgressStatus(`Enviando ${i + 1} de ${totalFiles}: ${fileTitle}...`);
 
-        if (uploadRes?.media) {
-          createdMedia = uploadRes.media;
-          setMediaList((prev) => [uploadRes.media, ...prev.filter((m) => m.id !== uploadRes.media.id)]);
-          if (uploadRes.savedToDrive) {
-            showToast(
-              'success',
-              `📸 Mídia salva e catalogada no Google Drive com sucesso (${uploadRes.media.unique_code || 'Drive'})!`
-            );
+          try {
+            const uploadRes = await api.uploadCompanyMediaFileChunked({
+              file: fileItem.file,
+              name: fileTitle,
+              duration: Number(fileItem.duration) || (fileItem.isVideo ? 15 : 10),
+              addToAllPlaylists: isTargetAllPlaylists,
+              clientDriveToken: currentToken,
+              onProgress: (pct) => {
+                const stepBase = (i / totalFiles) * 100;
+                const stepFraction = (pct / totalFiles);
+                setUploadProgress(Math.min(98, Math.round(stepBase + stepFraction)));
+              },
+            });
+
+            if (uploadRes?.media) {
+              createdMedias.push(uploadRes.media);
+            }
+          } catch (fileErr: any) {
+            console.error('Falha ao enviar arquivo:', fileItem.name, fileErr);
+            showToast('error', `Falha ao enviar "${fileItem.name}": ${fileErr.message || 'Erro de rede'}`);
           }
         }
-      } else if (mediaSourceType === 'weather_clock') {
-        targetFileUrl = 'widget:weather_clock';
-      } else if (mediaSourceType === 'rss') {
-        if (!targetFileUrl.trim()) {
-          showToast('error', 'Informe a URL do feed RSS.');
-          setIsUploadingMedia(false);
-          return;
-        }
-      } else {
-        if (!targetFileUrl.trim()) {
-          showToast('error', 'Informe a URL da mídia.');
-          setIsUploadingMedia(false);
-          return;
-        }
-        targetFileUrl = resolveMediaDisplayUrl(targetFileUrl);
-      }
 
-      if (!createdMedia) {
-        mediaTitle = mediaForm.name.trim() || (mediaSourceType === 'rss' ? 'Notícias RSS' : 'Nova Mídia');
-        createdMedia = await api.uploadCompanyMedia({
-          name: mediaTitle,
+        setUploadProgress(100);
+      } else {
+        // Fonte URL, RSS ou Widget
+        let targetFileUrl = mediaForm.file_url;
+        if (mediaSourceType === 'weather_clock') {
+          targetFileUrl = 'widget:weather_clock';
+        } else if (mediaSourceType === 'rss') {
+          if (!targetFileUrl.trim()) {
+            showToast('error', 'Informe a URL do feed RSS.');
+            setIsUploadingMedia(false);
+            return;
+          }
+        } else {
+          if (!targetFileUrl.trim()) {
+            showToast('error', 'Informe a URL da mídia.');
+            setIsUploadingMedia(false);
+            return;
+          }
+          targetFileUrl = resolveMediaDisplayUrl(targetFileUrl);
+        }
+
+        const singleTitle = mediaForm.name.trim() || (mediaSourceType === 'rss' ? 'Notícias RSS' : 'Nova Mídia');
+        const created = await api.uploadCompanyMedia({
+          name: singleTitle,
           type: mediaSourceType === 'weather_clock' ? 'weather_clock' : mediaSourceType === 'rss' ? 'rss' : mediaForm.type,
           file_url: targetFileUrl,
           duration: Number(mediaForm.duration) || 10,
           addToAllPlaylists: isTargetAllPlaylists,
         });
-        if (createdMedia) {
-          setMediaList((prev) => [createdMedia!, ...prev.filter((m) => m.id !== createdMedia!.id)]);
+
+        if (created) {
+          createdMedias.push(created);
         }
       }
 
-      // Se foi solicitado incluir em todas as playlists da empresa:
-      let targetPl: Playlist | null = null;
-      if (isTargetAllPlaylists && createdMedia) {
-        try {
-          await api.addMediaToAllPlaylists(createdMedia.id, {
-            duration: Number(createdMedia.duration) || 10,
-            restartPlayers: andRestart,
-            forceDuplicate: false,
-          });
-        } catch (allPlErr) {
-          console.warn('Inclusão em todas as playlists já processada no servidor:', allPlErr);
-        }
-      } else {
-        // Se foi selecionada uma playlist de destino específica ou se o modal de playlist está aberto
-        const targetPlId = targetPlaylistIdForNewMedia || (playlistModalOpen && editingPlaylist ? editingPlaylist.id : '');
-        targetPl = playlists.find((p) => p.id === targetPlId) || (editingPlaylist?.id === targetPlId ? editingPlaylist : null);
+      if (createdMedias.length === 0) {
+        showToast('error', 'Nenhuma mídia pôde ser salva.');
+        setIsUploadingMedia(false);
+        return;
+      }
 
-        if (createdMedia && targetPl) {
-          const itemDuration = Number(createdMedia.duration) || (createdMedia.type === 'rss' ? 15 : 10);
-          const nowStr = new Date().toISOString();
+      // Atualiza a biblioteca de mídias imediatamente
+      setMediaList((prev) => [
+        ...createdMedias,
+        ...prev.filter((m) => !createdMedias.some((cm) => cm.id === m.id)),
+      ]);
 
-          // Preserva todos os itens atuais que estão no formulário aberto para evitar perder itens recém-adicionados
-          const baseItems = (playlistModalOpen && editingPlaylist?.id === targetPl.id && playlistForm.items.length > 0)
-            ? playlistForm.items.map((it, idx) => {
-                const foundMedia = mediaList.find((m) => m.id === it.media_id);
-                return {
-                  id: it.id || `pli-${Date.now()}-${idx}`,
-                  playlist_id: targetPl!.id,
-                  media_id: it.media_id,
-                  position: idx + 1,
-                  duration: Number(it.duration) || 10,
-                  name: foundMedia?.name || it.name,
-                  type: foundMedia?.type || it.type,
-                  file_url: foundMedia?.file_url || it.file_url,
-                  schedule_enabled: Boolean(it.schedule_enabled),
-                  schedule_days: it.schedule_days,
-                  schedule_start_time: it.schedule_start_time,
-                  schedule_end_time: it.schedule_end_time,
-                  schedule_start_date: it.schedule_start_date,
-                  schedule_end_date: it.schedule_end_date,
-                  volume: it.volume !== undefined ? Number(it.volume) : 100,
-                  is_muted: Boolean(it.is_muted),
-                  created_at: it.created_at || nowStr,
-                };
-              })
-            : (targetPl.items || []).map((it, idx) => ({ ...it, position: idx + 1 }));
+      // VINCULAR MÍDIAS ÀS PLAYLISTS SELECIONADAS
+      const nowStr = new Date().toISOString();
+      for (const targetId of targetPlIds) {
+        const pl = playlists.find((p) => p.id === targetId);
+        if (!pl) continue;
 
-          const newItem = {
-            id: `pli-${Date.now()}`,
-            playlist_id: targetPl.id,
-            media_id: createdMedia.id,
-            position: baseItems.length + 1,
+        let currentPlItems = [...(pl.items || [])];
+        for (const created of createdMedias) {
+          const itemDuration = Number(created.duration) || (created.type === 'rss' ? 15 : 10);
+          const newItem: PlaylistItem = {
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            playlist_id: pl.id,
+            media_id: created.id,
+            position: currentPlItems.length + 1,
             duration: itemDuration,
-            name: createdMedia.name,
-            type: createdMedia.type,
-            file_url: createdMedia.file_url,
+            name: created.name,
+            type: created.type,
+            file_url: created.file_url,
             created_at: nowStr,
           };
+          currentPlItems.push(newItem);
+        }
 
-          const updatedItems = [...baseItems, newItem];
+        // Reordenar posições
+        const updatedItems = currentPlItems.map((it, idx) => ({ ...it, position: idx + 1 }));
 
-          // Atualizar no formulário se estiver aberto
-          if (playlistModalOpen && editingPlaylist?.id === targetPl.id) {
-            setPlaylistForm((prev) => ({
-              ...prev,
-              items: [
-                ...prev.items,
-                {
-                  id: newItem.id,
-                  media_id: createdMedia!.id,
-                  duration: itemDuration,
-                  name: createdMedia!.name,
-                  type: createdMedia!.type,
-                  file_url: createdMedia!.file_url,
-                },
-              ],
-            }));
-            setEditingPlaylist((prev) => (prev ? { ...prev, items: updatedItems } : null));
+        // Atualizar no formulário se for a playlist em edição
+        if (playlistModalOpen && editingPlaylist?.id === pl.id) {
+          setPlaylistForm((prev) => ({
+            ...prev,
+            items: [
+              ...prev.items,
+              ...createdMedias.map((cm) => ({
+                id: `pli-${Date.now()}-${cm.id}`,
+                media_id: cm.id,
+                duration: Number(cm.duration) || 10,
+                name: cm.name,
+                type: cm.type,
+                file_url: cm.file_url,
+              })),
+            ],
+          }));
+          setEditingPlaylist((prev) => (prev ? { ...prev, items: updatedItems } : null));
+        }
+
+        try {
+          const savedPl = await api.updateCompanyPlaylist(pl.id, {
+            ...pl,
+            items: updatedItems,
+            restartPlayers: andRestart,
+          });
+          if (savedPl) {
+            setPlaylists((prev) => prev.map((p) => (p.id === pl.id ? savedPl : p)));
           }
-
-          // Salvar a playlist atualizada no servidor
-          try {
-            const savedPl = await api.updateCompanyPlaylist(targetPl.id, {
-              ...targetPl,
-              items: updatedItems,
-              restartPlayers: andRestart,
-            });
-            if (savedPl) {
-              setPlaylists((prev) => prev.map((p) => (p.id === targetPl!.id ? savedPl : p)));
-            }
-          } catch (plErr) {
-            console.warn('Falha ao adicionar mídia diretamente à playlist:', plErr);
-          }
+        } catch (plErr) {
+          console.warn('Erro ao atualizar playlist com nova mídia:', plErr);
         }
       }
 
-      // Reiniciar players se solicitado
+      // Reiniciar telas se solicitado
       if (andRestart) {
-        await handleRestartPlayers({
-          playlistId: targetPl?.id,
-          playlistName: targetPl?.name,
-        });
+        await handleRestartPlayers({});
       }
 
       showToast(
         'success',
-        isTargetAllPlaylists
-          ? `Mídia "${mediaTitle}" carregada e incluída em TODAS as ${playlists.length} playlists da empresa!${andRestart ? ' Reprodutores reiniciados.' : ''}`
-          : targetPl
-          ? `Mídia "${mediaTitle}" carregada e incluída na playlist "${targetPl.name}"!${andRestart ? ' Reprodutores reiniciados.' : ''}`
-          : `Mídia "${mediaTitle}" cadastrada com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
+        createdMedias.length === 1
+          ? `Mídia "${createdMedias[0].name}" enviada e sincronizada na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
+          : `${createdMedias.length} mídias enviadas e sincronizadas na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
       );
 
       setMediaModalOpen(false);
@@ -1714,6 +1921,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       showToast('error', err.message || 'Erro ao cadastrar mídia.');
     } finally {
       setIsUploadingMedia(false);
+      setUploadProgressStatus('');
     }
   };
 
@@ -3289,35 +3497,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 onClick={handleSyncDriveMedia}
                 disabled={isSyncingDriveMedia}
                 className="w-full sm:w-auto justify-center flex items-center gap-2 rounded-lg border border-blue-500/40 bg-blue-600/20 px-3 py-2 text-xs font-bold uppercase tracking-wider text-blue-200 shadow-sm hover:bg-blue-600/30 hover:text-white transition cursor-pointer disabled:opacity-50 text-center"
-                title="Sincroniza e importa arquivos e fotos que você colocou diretamente na pasta do Google Drive pelo seu computador para ficarem visíveis no celular e nas TVs"
+                title="Sincroniza os arquivos em nuvem entre celular, computador e reprodutores"
               >
                 <RefreshCw className={`h-4 w-4 shrink-0 ${isSyncingDriveMedia ? 'animate-spin text-blue-400' : 'text-blue-300'}`} />
-                <span className="truncate">{isSyncingDriveMedia ? 'Sincronizando...' : 'Sincronizar'}</span>
-              </button>
-
-              <button
-                id="btn-open-r2-modal"
-                type="button"
-                onClick={() => setR2ModalOpen(true)}
-                className={`w-full sm:w-auto justify-center flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-bold uppercase tracking-wider shadow-sm transition cursor-pointer text-center ${
-                  r2Configured
-                    ? 'border-emerald-500/50 bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900/60 hover:text-white'
-                    : 'border-orange-500/40 bg-orange-600/20 text-orange-200 hover:bg-orange-600/35 hover:text-white'
-                }`}
-                title={r2Configured ? `Cloudflare R2 Ativo (${r2BucketName}) - CDN global de alta velocidade permanente` : "Configurar Cloudflare R2 para armazenamento definitivo com tráfego 100% grátis e sem expiração de token"}
-              >
-                {r2Configured ? (
-                  <>
-                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <Cloud className="h-4 w-4 shrink-0 text-emerald-400" />
-                    <span className="truncate">Nuvem R2 Ativa ({r2BucketName || 'CDN'})</span>
-                  </>
-                ) : (
-                  <>
-                    <Cloud className="h-4 w-4 shrink-0 text-orange-400" />
-                    <span className="truncate">Nuvem R2 (Definitiva)</span>
-                  </>
-                )}
+                <span className="truncate">{isSyncingDriveMedia ? 'Sincronizando...' : 'Sincronizar Arquivos'}</span>
               </button>
 
               <button
@@ -3354,38 +3537,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   </span>
                 </div>
                 <div className="h-8 w-px bg-slate-700 mx-1" />
-                {r2Configured ? (
-                  <button
-                    type="button"
-                    onClick={() => setR2ModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
-                    title="Nuvem Cloudflare R2 Conectada com CDN permanente. Clique para gerenciar."
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <Cloud className="h-3 w-3 text-emerald-400" />
-                    <span>Nuvem R2 Conectada</span>
-                  </button>
-                ) : driveConnected ? (
-                  <button
-                    type="button"
-                    onClick={() => setDriveTokenModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
-                    title="Google Drive conectado para fotos e vídeos da empresa. Clique para alternar conta se desejar."
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Drive Conectado{driveAccountEmail ? ` (${driveAccountEmail.split('@')[0]})` : ''}</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setR2ModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-orange-950/80 border border-orange-500/80 text-orange-300 hover:bg-orange-900/60 text-[11px] font-semibold transition cursor-pointer shadow-xs"
-                    title="Clique para configurar armazenamento em nuvem definitivo (Cloudflare R2 ou Google Drive)"
-                  >
-                    <Cloud className="h-3 w-3 text-orange-400" />
-                    <span>Ativar Nuvem Definitiva</span>
-                  </button>
-                )}
+                <div
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-600/80 text-emerald-300 text-[11px] font-semibold shadow-xs"
+                  title="Armazenamento e sincronização em nuvem ativos entre todos os seus dispositivos e telas"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <Cloud className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Sincronização em Nuvem Ativa</span>
+                </div>
               </div>
             </div>
 
@@ -3636,36 +3795,35 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
                       {(m.drive_view_url || m.drive_file_id) && (
                         <a
-                          href={m.drive_view_url || `https://drive.google.com/file/d/${m.drive_file_id}/view`}
+                          href={m.drive_view_url || m.file_url}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-950/80 border border-blue-700/80 text-blue-300 hover:text-white hover:bg-blue-900 transition text-[11px] font-semibold"
-                          title="Visualizar mídia original no Google Drive"
+                          title="Visualizar arquivo em tamanho original"
                         >
-                          <HardDrive className="h-3 w-3 text-blue-400 shrink-0" />
-                          <span>Ver no Drive</span>
-                          <ExternalLink className="h-2.5 w-2.5 opacity-70" />
+                          <ExternalLink className="h-3 w-3 text-blue-400 shrink-0" />
+                          <span>Abrir Mídia</span>
                         </a>
                       )}
                     </div>
 
-                    {/* Botões de Ação Responsivos (com opção de carregar em todas as playlists) */}
+                    {/* Botões de Ação Responsivos (com opção de escolher playlists) */}
                     <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5 w-full">
                       <button
                         type="button"
-                        onClick={() => openAddToAllPlaylistsModal(m)}
+                        onClick={() => openChoosePlaylistsModal(m)}
                         className={`col-span-2 sm:col-span-1 min-h-[34px] px-2.5 py-1 rounded-lg border text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
                           memberPlaylists.length === playlists.length && playlists.length > 0
                             ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60 hover:text-white'
                             : 'border-amber-500/50 bg-amber-950/40 text-amber-300 hover:bg-amber-900/60 hover:text-white'
                         }`}
-                        title="Carregar esta mídia para todas as playlists da empresa de uma só vez"
+                        title="Escolher em quais playlists esta mídia será exibida"
                       >
-                        <Layers className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        <CheckSquare className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                         <span className="truncate">
-                          {memberPlaylists.length === playlists.length && playlists.length > 0
-                            ? `Em Todas (${playlists.length})`
-                            : 'Todas as Playlists'}
+                          {memberPlaylists.length > 0
+                            ? `Escolher Playlists (${memberPlaylists.length}/${playlists.length})`
+                            : 'Escolher Playlists'}
                         </span>
                       </button>
 
@@ -5490,16 +5648,16 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     id="company-media-file-input"
                     ref={fileInputRef}
                     type="file"
+                    multiple
                     accept="image/*,video/*,.mp4,.webm,.mov,.mkv,.avi,.m4v,.jpg,.jpeg,.png,.webp,.gif,.svg,.bmp,.avif"
                     className="hidden"
                     onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) handleProcessDeviceFile(file);
+                      if (e.target.files) handleProcessDeviceFiles(e.target.files);
                       e.target.value = '';
                     }}
                   />
 
-                  {!selectedDeviceFile ? (
+                  {selectedDeviceFiles.length === 0 ? (
                     <label
                       htmlFor="company-media-file-input"
                       onDragOver={(e) => {
@@ -5510,8 +5668,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       onDrop={(e) => {
                         e.preventDefault();
                         setIsDraggingFile(false);
-                        const file = e.dataTransfer.files?.[0];
-                        if (file) handleProcessDeviceFile(file);
+                        if (e.dataTransfer.files) handleProcessDeviceFiles(e.dataTransfer.files);
                       }}
                       className={`flex flex-col items-center justify-center border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition ${
                         isDraggingFile
@@ -5523,129 +5680,116 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         <FileUp className="h-6 w-6" />
                       </div>
                       <p className="text-sm font-bold text-white mb-1">
-                        Clique para escolher ou arraste o arquivo aqui
+                        Clique para escolher ou arraste múltiplos arquivos aqui
                       </p>
                       <p className="text-[11px] text-slate-400 max-w-xs">
-                        Suporta vídeos (MP4, WebM, MOV) e imagens (JPG, PNG, WEBP, GIF) até 200 MB
+                        Suporta seleção múltipla de fotos e vídeos (MP4, WebM, MOV, JPG, PNG, WEBP) até 200 MB por arquivo
                       </p>
                       <span className="mt-3 px-3 py-1.5 rounded-lg bg-blue-600 text-white font-semibold text-xs hover:bg-blue-500 transition shadow-xs">
-                        Selecionar Arquivo do Dispositivo
+                        Selecionar Arquivos do Dispositivo
                       </span>
                     </label>
                   ) : (
                     <div className="rounded-xl border border-slate-700 bg-slate-800/90 p-3.5 space-y-3">
-                      <div className="relative rounded-lg overflow-hidden bg-black/60 border border-slate-700 flex items-center justify-center max-h-44">
-                        {selectedDeviceFile.isVideo ? (
-                          <video
-                            src={selectedDeviceFile.dataUrl}
-                            className="w-full max-h-44 object-contain"
-                            controls
-                            muted
-                            onLoadedMetadata={(e) => {
-                              const d = Math.round((e.target as HTMLVideoElement).duration);
-                              if (!isNaN(d) && d > 0) {
-                                setMediaForm((prev) => ({ ...prev, duration: d }));
-                              }
-                            }}
-                          />
-                        ) : (
-                          <img
-                            src={selectedDeviceFile.dataUrl}
-                            alt="Pré-visualização"
-                            className="w-full max-h-44 object-contain"
-                          />
-                        )}
-                        <span className="absolute top-2 left-2 rounded px-2 py-0.5 text-[9px] font-extrabold uppercase bg-slate-900/90 border border-slate-700 text-white shadow-sm">
-                          {selectedDeviceFile.isVideo ? 'VÍDEO CARREGADO' : 'IMAGEM CARREGADA'}
+                      {/* Top bar with count & add more */}
+                      <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
+                        <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                          <span>{selectedDeviceFiles.length} mídia(s) na fila para envio</span>
                         </span>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs">
-                        <div className="truncate pr-2">
-                          <p className="font-bold text-white truncate flex items-center gap-1.5">
-                            <FileText className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                            <span className="truncate">{selectedDeviceFile.name}</span>
-                          </p>
-                          <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
-                            {selectedDeviceFile.sizeFormatted} • {selectedDeviceFile.type}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-2">
                           <label
                             htmlFor="company-media-file-input"
-                            className="text-xs text-blue-400 hover:text-blue-300 underline font-semibold cursor-pointer"
+                            className="px-2.5 py-1 rounded bg-blue-600/30 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 text-[11px] font-bold cursor-pointer transition flex items-center gap-1"
                           >
-                            Trocar
+                            <Plus className="h-3 w-3" />
+                            <span>+ Mais Arquivos</span>
                           </label>
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedDeviceFile(null);
+                              setSelectedDeviceFiles([]);
                               if (fileInputRef.current) fileInputRef.current.value = '';
                             }}
-                            className="p-1 rounded-md text-slate-400 hover:text-rose-400 hover:bg-slate-700 cursor-pointer"
-                            title="Remover arquivo"
+                            className="text-[11px] text-slate-400 hover:text-rose-400 px-2 py-1 transition cursor-pointer"
                           >
-                            <X className="h-4 w-4" />
+                            Limpar Tudo
                           </button>
                         </div>
                       </div>
 
-                      {r2Configured ? (
-                        <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
-                          <Cloud className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-                          <div className="flex-1">
-                            <p className="font-bold text-white flex items-center gap-2">
-                              <span>Nuvem Cloudflare R2 Ativa ({r2BucketName || 'CDN Global'})</span>
-                              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-900/60 border border-emerald-700/60 text-emerald-300">Definitivo</span>
-                            </p>
-                            <p className="text-[11px] text-emerald-300 mt-0.5">
-                              Esta mídia será transmitida diretamente pela CDN global do Cloudflare R2 com link público permanente, sem limite de tráfego e sem expiração de token nas TVs.
-                            </p>
-                          </div>
-                        </div>
-                      ) : driveConnected ? (
-                        <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
-                          <HardDrive className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-                          <div className="flex-1">
-                            <p className="font-bold text-white">Google Drive Vinculado ({driveAccountEmail || 'Conta Ativa'})</p>
-                            <p className="text-[11px] text-emerald-300 mt-0.5">
-                              Esta mídia será salva e catalogada no Google Drive da sua empresa (pasta <code className="bg-slate-900 px-1 py-0.5 rounded text-emerald-200">📸 Fotos com Código Único</code>) com link para exibição nas TVs.
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-2 rounded-lg bg-slate-900/80 border border-slate-700 p-3 text-xs text-slate-300">
-                          <div className="flex items-start gap-2">
-                            <Database className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
-                            <div>
-                              <p className="font-bold text-white">Armazenamento Local do Servidor Ativo</p>
-                              <p className="text-[11px] text-slate-400 mt-0.5">
-                                A mídia será salva no servidor e transmitida diretamente às TVs. Para armazenamento em nuvem definitivo e independente, ative o Cloudflare R2 ou Google Drive.
-                              </p>
+                      {/* Scrollable list of queued files */}
+                      <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                        {selectedDeviceFiles.map((item, idx) => (
+                          <div
+                            key={item.id}
+                            className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-900/80 border border-slate-700/70"
+                          >
+                            {/* Thumbnail Preview */}
+                            <div className="w-16 h-12 rounded overflow-hidden bg-black shrink-0 flex items-center justify-center border border-slate-700">
+                              {item.isVideo ? (
+                                <video src={item.dataUrl} className="w-full h-full object-cover" muted />
+                              ) : (
+                                <img src={item.dataUrl} alt={item.name} className="w-full h-full object-cover" />
+                              )}
                             </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+
+                            {/* Details and Editable Title */}
+                            <div className="flex-1 min-w-0 space-y-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-slate-500 text-[10px] font-bold">#{idx + 1}</span>
+                                <input
+                                  type="text"
+                                  value={item.name}
+                                  onChange={(e) => handleUpdateDeviceFile(item.id, { name: e.target.value })}
+                                  placeholder="Nome da mídia"
+                                  className="w-full text-xs font-semibold text-white bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-blue-500"
+                                />
+                              </div>
+                              <div className="flex items-center justify-between text-[10px] text-slate-400">
+                                <span className="font-mono truncate">{item.sizeFormatted} &bull; {item.isVideo ? 'Vídeo' : 'Imagem'}</span>
+                                <div className="flex items-center gap-1 shrink-0 ml-2">
+                                  <Clock className="h-3 w-3 text-slate-400" />
+                                  <input
+                                    type="number"
+                                    min={2}
+                                    max={600}
+                                    value={item.duration}
+                                    onChange={(e) => handleUpdateDeviceFile(item.id, { duration: Math.max(1, Number(e.target.value) || 10) })}
+                                    className="w-12 text-center text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white font-mono"
+                                    title="Duração em segundos"
+                                  />
+                                  <span>s</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Remove button */}
                             <button
                               type="button"
-                              onClick={() => setR2ModalOpen(true)}
-                              className="px-2.5 py-1 rounded-md bg-orange-600/30 hover:bg-orange-600 border border-orange-500/50 text-orange-200 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
+                              onClick={() => handleRemoveDeviceFile(item.id)}
+                              className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition cursor-pointer shrink-0"
+                              title="Remover da fila"
                             >
-                              <Cloud className="h-3 w-3 text-orange-400" />
-                              <span>Configurar Nuvem R2 (Recomendado)</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDriveTokenModalOpen(true)}
-                              className="px-2.5 py-1 rounded-md bg-blue-600/30 hover:bg-blue-600 border border-blue-500/50 text-blue-200 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
-                            >
-                              <HardDrive className="h-3 w-3 text-blue-400" />
-                              <span>Configurar Google Drive</span>
+                              <X className="h-4 w-4" />
                             </button>
                           </div>
+                        ))}
+                      </div>
+
+                      {/* White-label neutral cloud status */}
+                      <div className="flex items-start gap-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 p-2.5 text-xs text-emerald-200">
+                        <Cloud className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="font-bold text-white flex items-center gap-2">
+                            <span>Sincronização em Nuvem Ativa</span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-900/60 border border-emerald-700/60 text-emerald-300">Automático</span>
+                          </p>
+                          <p className="text-[11px] text-emerald-300/90 mt-0.5">
+                            Todas as mídias selecionadas serão enviadas e sincronizadas na nuvem para visualização imediata no celular, computador e em todos os reprodutores da sua rede.
+                          </p>
                         </div>
-                      )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -5971,80 +6115,84 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   ) : null}
                 </div>
 
-                {/* Opção Destacada: Carregar para Todas as Playlists */}
-                <div
-                  onClick={() => {
-                    const newVal = !uploadToAllPlaylists;
-                    setUploadToAllPlaylists(newVal);
-                    if (newVal) {
-                      setTargetPlaylistIdForNewMedia('__ALL_PLAYLISTS__');
-                    } else if (targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__') {
-                      setTargetPlaylistIdForNewMedia('');
-                    }
-                  }}
-                  className={`p-3 rounded-xl border transition cursor-pointer flex items-start gap-3 ${
-                    uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__'
-                      ? 'bg-amber-950/40 border-amber-500/70 text-amber-100 ring-1 ring-amber-500/30'
-                      : 'bg-slate-800/80 border-slate-700 hover:border-slate-600 text-slate-300'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    id="chk-upload-to-all-playlists"
-                    checked={uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__'}
-                    onChange={(e) => {
-                      setUploadToAllPlaylists(e.target.checked);
-                      if (e.target.checked) {
-                        setTargetPlaylistIdForNewMedia('__ALL_PLAYLISTS__');
-                      } else if (targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__') {
-                        setTargetPlaylistIdForNewMedia('');
-                      }
-                    }}
-                    className="mt-0.5 h-4 w-4 rounded border-slate-600 text-amber-500 focus:ring-amber-400 cursor-pointer"
-                  />
-                  <div className="flex-1">
-                    <label
-                      htmlFor="chk-upload-to-all-playlists"
-                      className="font-bold text-xs text-white flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Layers className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                      <span>Carregar para todas as playlists de uma só vez</span>
-                    </label>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Adiciona esta nova mídia automaticamente a todas as <strong>{playlists.length}</strong> playlists cadastradas na sua empresa.
-                    </p>
+                {/* Seletor de Playlists com Checkers */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-300">
+                      Selecione em quais playlists incluir:
+                    </span>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTargetPlaylistIdsForNewMedia(playlists.map((p) => p.id));
+                          setUploadToAllPlaylists(true);
+                        }}
+                        className="text-amber-400 hover:text-amber-300 font-semibold cursor-pointer underline"
+                      >
+                        Marcar Todas
+                      </button>
+                      <span className="text-slate-600">&bull;</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTargetPlaylistIdsForNewMedia([]);
+                          setUploadToAllPlaylists(false);
+                          setTargetPlaylistIdForNewMedia('');
+                        }}
+                        className="text-slate-400 hover:text-slate-300 font-semibold cursor-pointer underline"
+                      >
+                        Desmarcar
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
+                    {playlists.map((pl) => {
+                      const isChecked =
+                        uploadToAllPlaylists ||
+                        targetPlaylistIdsForNewMedia.includes(pl.id) ||
+                        targetPlaylistIdForNewMedia === pl.id ||
+                        targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__';
+                      return (
+                        <div
+                          key={pl.id}
+                          onClick={() => {
+                            if (uploadToAllPlaylists) {
+                              setUploadToAllPlaylists(false);
+                              setTargetPlaylistIdsForNewMedia(playlists.filter((p) => p.id !== pl.id).map((p) => p.id));
+                            } else {
+                              setTargetPlaylistIdsForNewMedia((prev) =>
+                                prev.includes(pl.id) ? prev.filter((id) => id !== pl.id) : [...prev, pl.id]
+                              );
+                            }
+                          }}
+                          className={`flex items-center justify-between p-2 rounded-lg border transition cursor-pointer text-xs ${
+                            isChecked
+                              ? 'bg-indigo-950/40 border-indigo-500/70 text-white'
+                              : 'bg-slate-800/80 border-slate-700 text-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {}}
+                              className="h-4 w-4 rounded border-slate-600 text-indigo-500 focus:ring-indigo-400 cursor-pointer shrink-0"
+                            />
+                            <span className="font-semibold truncate">{pl.name}</span>
+                            {pl.store_name && (
+                              <span className="text-[10px] text-slate-400 truncate">({pl.store_name})</span>
+                            )}
+                          </div>
+                          <span className="text-[10px] text-slate-400 shrink-0 font-mono">
+                            {pl.items?.length || 0} mídias
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
-
-                {/* Se não marcou todas, pode selecionar uma playlist específica */}
-                {!(uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__') && (
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-400 mb-1">
-                      Ou selecione uma playlist específica:
-                    </label>
-                    <select
-                      value={targetPlaylistIdForNewMedia}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setTargetPlaylistIdForNewMedia(val);
-                        if (val === '__ALL_PLAYLISTS__') {
-                          setUploadToAllPlaylists(true);
-                        } else {
-                          setUploadToAllPlaylists(false);
-                        }
-                      }}
-                      className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-indigo-500 text-xs"
-                    >
-                      <option value="">Não vincular agora (salvar apenas na biblioteca de mídias)</option>
-                      <option value="__ALL_PLAYLISTS__">⭐ Adicionar a TODAS as playlists ({playlists.length} playlists)</option>
-                      {playlists.map((pl) => (
-                        <option key={pl.id} value={pl.id}>
-                          {pl.name} ({pl.items?.length || 0} mídias) {pl.store_name ? `• ${pl.store_name}` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
               </div>
               </div>
 
@@ -6074,7 +6222,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     disabled={
                       isUploadingMedia ||
                       mediaList.length >= effectiveMaxMedia ||
-                      (mediaSourceType === 'device' && !selectedDeviceFile && !mediaForm.file_url) ||
+                      (mediaSourceType === 'device' && selectedDeviceFiles.length === 0 && !mediaForm.file_url) ||
                       (mediaSourceType === 'url' && (!mediaForm.file_url.trim() || !mediaForm.name.trim())) ||
                       (mediaSourceType === 'rss' && !mediaForm.file_url.trim())
                     }
@@ -6085,18 +6233,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     {isUploadingMedia ? (
                       <>
                         <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        <span>Enviando... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
+                        <span>{uploadProgressStatus || `Enviando... ${uploadProgress}%`}</span>
                       </>
                     ) : (
                       <>
                         <RefreshCw className="h-3.5 w-3.5" />
-                        <span>
-                          {uploadToAllPlaylists || targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__'
-                            ? 'Salvar em Todas as Playlists e Reiniciar'
-                            : targetPlaylistIdForNewMedia
-                            ? 'Salvar, Incluir na Playlist e Reiniciar'
-                            : 'Salvar e Reiniciar Telas'}
-                        </span>
+                        <span>Salvar e Reiniciar Telas</span>
                       </>
                     )}
                   </button>
@@ -6730,8 +6872,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         </div>
       )}
 
-      {/* MODAL DE CARREGAR MÍDIA PARA TODAS AS PLAYLISTS */}
-      {addToAllPlaylistsModalMedia && (
+      {/* MODAL DE ESCOLHER PLAYLISTS COM CHECKERS */}
+      {choosePlaylistsModalMedia && (
         <div className="fixed inset-0 z-80 flex items-end sm:items-center justify-center bg-black/85 p-0 sm:p-4 backdrop-blur-xs overflow-x-hidden">
           <div className="w-full max-w-lg max-w-[calc(100vw-1rem)] rounded-t-2xl sm:rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl text-slate-100 max-h-[92vh] sm:max-h-[88vh] flex flex-col animate-in slide-in-from-bottom sm:slide-in-from-bottom-0 overflow-x-hidden">
             {/* Mobile Drag Indicator */}
@@ -6740,20 +6882,20 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             <div className="shrink-0 px-5 py-3 sm:py-4 border-b border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 shrink-0 border border-amber-500/30">
-                  <Layers className="h-5 w-5" />
+                  <CheckSquare className="h-5 w-5" />
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white leading-tight">
-                    Carregar para Todas as Playlists
+                    Escolher Playlists
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Vincular mídia em todas as playlists de uma só vez
+                    Selecione com o checker em quais playlists exibir esta mídia
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setAddToAllPlaylistsModalMedia(null)}
+                onClick={() => setChoosePlaylistsModalMedia(null)}
                 className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition cursor-pointer"
               >
                 <X className="h-5 w-5" />
@@ -6764,39 +6906,28 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               {/* Media Card Preview */}
               <div className="rounded-xl border border-slate-700/80 bg-slate-800/80 p-3.5 flex items-center gap-3">
                 <div className="w-20 aspect-video rounded-lg overflow-hidden bg-black shrink-0 flex items-center justify-center border border-slate-700">
-                  <MediaThumbnail media={addToAllPlaylistsModalMedia} showBadge={false} showDuration={false} />
+                  <MediaThumbnail media={choosePlaylistsModalMedia} showBadge={false} showDuration={false} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <h4 className="font-bold text-white text-sm truncate" title={addToAllPlaylistsModalMedia.name}>
-                    {addToAllPlaylistsModalMedia.name}
+                  <h4 className="font-bold text-white text-sm truncate" title={choosePlaylistsModalMedia.name}>
+                    {choosePlaylistsModalMedia.name}
                   </h4>
                   <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-1">
                     <span className="capitalize px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-medium">
-                      {addToAllPlaylistsModalMedia.type === 'weather_clock'
+                      {choosePlaylistsModalMedia.type === 'weather_clock'
                         ? 'Clima & Hora'
-                        : addToAllPlaylistsModalMedia.type === 'rss'
+                        : choosePlaylistsModalMedia.type === 'rss'
                         ? 'Notícias RSS'
-                        : addToAllPlaylistsModalMedia.type === 'video'
+                        : choosePlaylistsModalMedia.type === 'video'
                         ? 'Vídeo'
                         : 'Imagem'}
                     </span>
-                    <span>Duração: <strong>{addToAllPlaylistsModalMedia.duration}s</strong></span>
+                    <span>Duração atual: <strong>{choosePlaylistsModalMedia.duration}s</strong></span>
                   </div>
                 </div>
               </div>
 
-              {/* Informative Alert */}
-              <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-amber-200 space-y-1">
-                <p className="font-bold flex items-center gap-1.5">
-                  <Layers className="h-4 w-4 text-amber-400 shrink-0" />
-                  <span>Será incluída em {playlists.length} playlist(s)</span>
-                </p>
-                <p className="text-[11px] text-amber-300/90 leading-relaxed">
-                  Esta mídia será adicionada como novo item na sequência de todas as playlists cadastradas da empresa. Os reprodutores que estiverem exibindo essas playlists receberão a nova programação.
-                </p>
-              </div>
-
-              {/* Parâmetros: Duração */}
+              {/* Parâmetros: Duração e Opções */}
               <div className="space-y-3 bg-slate-800/60 rounded-xl p-3.5 border border-slate-700/60">
                 <div>
                   <label className="block font-semibold text-slate-300 mb-1">
@@ -6806,8 +6937,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     type="number"
                     min={2}
                     max={600}
-                    value={addToAllPlaylistsDuration}
-                    onChange={(e) => setAddToAllPlaylistsDuration(Math.max(1, Number(e.target.value) || 10))}
+                    value={choosePlaylistsDuration}
+                    onChange={(e) => setChoosePlaylistsDuration(Math.max(1, Number(e.target.value) || 10))}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs font-semibold"
                   />
                 </div>
@@ -6816,12 +6947,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <input
                     type="checkbox"
                     id="chk-duplicate-all-pl"
-                    checked={addToAllPlaylistsDuplicate}
-                    onChange={(e) => setAddToAllPlaylistsDuplicate(e.target.checked)}
+                    checked={choosePlaylistsDuplicate}
+                    onChange={(e) => setChoosePlaylistsDuplicate(e.target.checked)}
                     className="h-4 w-4 rounded border-slate-600 text-amber-500 focus:ring-amber-400 cursor-pointer"
                   />
                   <label htmlFor="chk-duplicate-all-pl" className="text-xs text-slate-300 cursor-pointer">
-                    Adicionar mesmo nas playlists que já contêm esta mídia
+                    Permitir duplicar mídia se já estiver na playlist
                   </label>
                 </div>
 
@@ -6829,8 +6960,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <input
                     type="checkbox"
                     id="chk-restart-all-pl"
-                    checked={addToAllPlaylistsRestart}
-                    onChange={(e) => setAddToAllPlaylistsRestart(e.target.checked)}
+                    checked={choosePlaylistsRestart}
+                    onChange={(e) => setChoosePlaylistsRestart(e.target.checked)}
                     className="h-4 w-4 rounded border-slate-600 text-indigo-500 focus:ring-indigo-400 cursor-pointer"
                   />
                   <label htmlFor="chk-restart-all-pl" className="text-xs text-slate-300 cursor-pointer font-medium">
@@ -6839,39 +6970,90 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Lista de Playlists Destino */}
-              <div>
-                <label className="block font-semibold text-slate-300 mb-1.5">
-                  Playlists que receberão a mídia ({playlists.length}):
-                </label>
-                <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
-                  {playlists.map((pl) => {
-                    const alreadyHas = pl.items.some((it) => it.media_id === addToAllPlaylistsModalMedia.id);
-                    return (
-                      <div
-                        key={pl.id}
-                        className="flex items-center justify-between p-2 rounded-lg bg-slate-800 border border-slate-700/70 text-xs"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Film className="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                          <span className="font-semibold text-white truncate">{pl.name}</span>
-                          {pl.store_name && (
-                            <span className="text-[10px] text-slate-400 truncate">({pl.store_name})</span>
-                          )}
-                        </div>
-                        <span
-                          className={`text-[10px] px-2 py-0.5 rounded-full font-bold shrink-0 ${
-                            alreadyHas
-                              ? 'bg-emerald-950 border border-emerald-700 text-emerald-300'
-                              : 'bg-blue-950 border border-blue-700 text-blue-300'
+              {/* Lista de Playlists com CHECKER na frente */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-slate-200 text-xs flex items-center gap-1.5">
+                    <CheckSquare className="h-3.5 w-3.5 text-amber-400" />
+                    <span>Playlists ({selectedPlaylistIdsForMedia.length} de {playlists.length} selecionadas):</span>
+                  </label>
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={handleSelectAllPlaylistsForMedia}
+                      className="text-amber-400 hover:text-amber-300 font-semibold cursor-pointer underline"
+                    >
+                      Marcar Todas
+                    </button>
+                    <span className="text-slate-600">&bull;</span>
+                    <button
+                      type="button"
+                      onClick={handleDeselectAllPlaylistsForMedia}
+                      className="text-slate-400 hover:text-slate-300 font-semibold cursor-pointer underline"
+                    >
+                      Desmarcar Todas
+                    </button>
+                  </div>
+                </div>
+
+                {playlists.length === 0 ? (
+                  <div className="p-4 rounded-lg bg-slate-800 text-center text-slate-400 text-xs">
+                    Nenhuma playlist cadastrada na empresa.
+                  </div>
+                ) : (
+                  <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                    {playlists.map((pl) => {
+                      const isChecked = selectedPlaylistIdsForMedia.includes(pl.id);
+                      const alreadyHas = pl.items && pl.items.some((it) => it.media_id === choosePlaylistsModalMedia.id);
+                      return (
+                        <div
+                          key={pl.id}
+                          onClick={() => handleTogglePlaylistSelectionForMedia(pl.id)}
+                          className={`flex items-center justify-between p-2.5 rounded-lg border transition cursor-pointer text-xs ${
+                            isChecked
+                              ? 'bg-amber-950/30 border-amber-500/60 text-white'
+                              : 'bg-slate-800/80 border-slate-700/70 text-slate-300 hover:border-slate-600'
                           }`}
                         >
-                          {alreadyHas ? 'Já incluída' : 'Receberá mídia'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {/* CHECKER NA FRENTE DO NOME */}
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => handleTogglePlaylistSelectionForMedia(pl.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="h-4 w-4 rounded border-slate-600 text-amber-500 focus:ring-amber-400 cursor-pointer shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <span className="font-semibold block truncate">{pl.name}</span>
+                              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
+                                <span>{pl.items?.length || 0} mídias</span>
+                                {pl.store_name && (
+                                  <>
+                                    <span>&bull;</span>
+                                    <span className="truncate text-indigo-300">{pl.store_name}</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="shrink-0 ml-2">
+                            {alreadyHas ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-950 border border-emerald-700 text-emerald-300">
+                                Já na playlist
+                              </span>
+                            ) : isChecked ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-950 border border-amber-600 text-amber-300">
+                                Será adicionada
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -6879,27 +7061,27 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             <div className="shrink-0 p-4 border-t border-slate-800 bg-slate-900/95 flex flex-col sm:flex-row items-center justify-end gap-2.5">
               <button
                 type="button"
-                disabled={isAddingToAllPlaylists}
-                onClick={() => setAddToAllPlaylistsModalMedia(null)}
+                disabled={isAddingToPlaylists}
+                onClick={() => setChoosePlaylistsModalMedia(null)}
                 className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-lg border border-slate-700 bg-slate-800 text-xs font-semibold text-slate-300 hover:bg-slate-700 cursor-pointer disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="button"
-                disabled={isAddingToAllPlaylists || playlists.length === 0}
-                onClick={handleConfirmAddToAllPlaylists}
+                disabled={isAddingToPlaylists || playlists.length === 0}
+                onClick={handleConfirmChoosePlaylists}
                 className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-xs font-bold text-white transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
               >
-                {isAddingToAllPlaylists ? (
+                {isAddingToPlaylists ? (
                   <>
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    <span>Carregando em todas as playlists...</span>
+                    <span>Salvando nas playlists...</span>
                   </>
                 ) : (
                   <>
-                    <Layers className="h-3.5 w-3.5" />
-                    <span>Confirmar e Carregar em Todas ({playlists.length})</span>
+                    <CheckSquare className="h-4 w-4" />
+                    <span>Salvar nas Playlists Selecionadas ({selectedPlaylistIdsForMedia.length})</span>
                   </>
                 )}
               </button>

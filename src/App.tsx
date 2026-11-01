@@ -10,7 +10,8 @@ import { PlayerView } from './views/PlayerView';
 import { ToastContainer, ToastMessage } from './components/Toast';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PresentationModal } from './components/PresentationModal';
-import { KeyRound, X } from 'lucide-react';
+import { KeyRound, X, LogOut } from 'lucide-react';
+import { initDeviceBackNavigation, setExitPromptCallback, registerBackHandler } from './lib/backNavigation';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -40,6 +41,62 @@ export default function App() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passLoading, setPassLoading] = useState(false);
+
+  // Exit App Confirmation Modal (intercepts hardware/device back button on mobile)
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+
+  // Initialize hardware/mobile back button navigation listener
+  useEffect(() => {
+    initDeviceBackNavigation();
+    setExitPromptCallback(() => {
+      setExitConfirmOpen(true);
+    });
+  }, []);
+
+  // Back handler for exit confirmation modal itself
+  useEffect(() => {
+    if (!exitConfirmOpen) return;
+    return registerBackHandler(() => {
+      setExitConfirmOpen(false);
+      return true;
+    });
+  }, [exitConfirmOpen]);
+
+  // Back handler for simulated player view
+  useEffect(() => {
+    if (!simulatedPlayerCode) return;
+    return registerBackHandler(() => {
+      setSimulatedPlayerCode(null);
+      return true;
+    });
+  }, [simulatedPlayerCode]);
+
+  // Back handler for presentation modal
+  useEffect(() => {
+    if (!presentationOpen) return;
+    return registerBackHandler(() => {
+      setPresentationOpen(false);
+      return true;
+    });
+  }, [presentationOpen]);
+
+  // Back handler for change password modal
+  useEffect(() => {
+    if (!changePasswordOpen) return;
+    return registerBackHandler(() => {
+      setChangePasswordOpen(false);
+      return true;
+    });
+  }, [changePasswordOpen]);
+
+  // Back handler for navbar activeTab (if not dashboard, back navigates back to dashboard)
+  useEffect(() => {
+    if (!user || activeTab === 'dashboard') return;
+    return registerBackHandler(() => {
+      setActiveTab('dashboard');
+      return true;
+    });
+  }, [user, activeTab]);
 
   const showToast = (type: 'success' | 'error' | 'info', text: string) => {
     const id = `${Date.now()}-${Math.random()}`;
@@ -430,6 +487,40 @@ export default function App() {
         onClose={() => setPresentationOpen(false)}
         defaultClientName={companyInfo?.name || ''}
       />
+
+      {/* MODAL DE CONFIRMAÇÃO DE SAÍDA (Acionado pela tecla voltar do dispositivo) */}
+      {exitConfirmOpen && (
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl text-slate-100 text-center animate-in zoom-in-95 duration-150">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400">
+              <LogOut className="h-7 w-7" />
+            </div>
+            <h3 className="text-lg font-bold text-white mb-2">Deseja sair do aplicativo?</h3>
+            <p className="text-xs text-slate-400 leading-relaxed mb-6">
+              Você está na tela inicial. Deseja realmente encerrar a sessão e sair do aplicativo?
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setExitConfirmOpen(false)}
+                className="flex-1 py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition cursor-pointer"
+              >
+                Continuar no App
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setExitConfirmOpen(false);
+                  handleLogout();
+                }}
+                className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-md"
+              >
+                Sair
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

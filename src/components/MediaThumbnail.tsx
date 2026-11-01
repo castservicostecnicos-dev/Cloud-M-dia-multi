@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { Media } from '../types';
 import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
+import { getIndexedDbMedia } from '../lib/indexedDbMedia';
 
 interface MediaThumbnailProps {
   media: Media | {
@@ -231,7 +232,13 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
                 } else if ((media as any).local_url && target.src !== (media as any).local_url) {
                   target.src = (media as any).local_url;
                 } else {
-                  setHasError(true);
+                  getIndexedDbMedia(media.id || media.file_url).then((recovered) => {
+                    if (recovered && target.src !== recovered) {
+                      target.src = recovered;
+                    } else {
+                      setHasError(true);
+                    }
+                  }).catch(() => setHasError(true));
                 }
               }}
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
@@ -316,7 +323,13 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
             } else if ((media as any).local_url && target.src !== (media as any).local_url) {
               target.src = (media as any).local_url;
             } else {
-              setHasError(true);
+              getIndexedDbMedia(media.id || media.file_url).then((recovered) => {
+                if (recovered && target.src !== recovered) {
+                  target.src = recovered;
+                } else {
+                  setHasError(true);
+                }
+              }).catch(() => setHasError(true));
             }
           }}
           className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
