@@ -803,6 +803,10 @@ export const resolveMediaDisplayUrl = (url: string | undefined | null): string =
 
   // Local uploads and backend stream proxy URLs
   if (trimmed.startsWith('/uploads/') || trimmed.startsWith('/api/drive/stream/')) {
+    try {
+      const cached = getCachedIndexedDbMediaSync(trimmed);
+      if (cached) return cached;
+    } catch {}
     return origin ? `${origin}${trimmed}` : trimmed;
   }
 
@@ -818,7 +822,7 @@ export const resolveMediaDisplayUrl = (url: string | undefined | null): string =
     }
   }
 
-  // Check IndexedDB local media storage
+  // Check IndexedDB / Cloud binary media storage
   if (trimmed.startsWith('idb:')) {
     try {
       const cached = getCachedIndexedDbMediaSync(trimmed);

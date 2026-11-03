@@ -2514,6 +2514,18 @@ apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: Auth
     }
   }
 
+  // Backup media binary in Firestore under media.id as well for resilient multi-device lookup
+  if (newMedia.file_url && newMedia.file_url.startsWith('/uploads/')) {
+    const filename = path.basename(newMedia.file_url);
+    const diskPath = path.join(uploadsDir, filename);
+    if (fs.existsSync(diskPath)) {
+      try {
+        const buf = fs.readFileSync(diskPath);
+        saveMediaBinaryToFirestore(newMedia.id, newMedia.mime_type || 'image/jpeg', buf).catch(() => {});
+      } catch {}
+    }
+  }
+
   db.persist();
 
   res.status(201).json({

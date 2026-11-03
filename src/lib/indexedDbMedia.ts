@@ -52,10 +52,63 @@ function openMediaDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveIndexedDbMedia(id: string, dataUrl: string): Promise<void> {
+export function getMediaCandidateKeys(input: any): string[] {
+  if (!input) return [];
+  const rawKeys: string[] = [];
+
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed) return [];
+    rawKeys.push(trimmed);
+    const withoutPrefix = trimmed.replace(/^idb:/, '').replace(/^\/uploads\//, '').replace(/^\//, '');
+    rawKeys.push(withoutPrefix);
+    const basename = trimmed.split('/').pop() || '';
+    if (basename) {
+      rawKeys.push(basename.replace(/^idb:/, ''));
+    }
+  } else if (typeof input === 'object') {
+    if (input.file_url && typeof input.file_url === 'string') {
+      const u = input.file_url.trim();
+      const withoutPrefix = u.replace(/^idb:/, '').replace(/^\/uploads\//, '').replace(/^\//, '');
+      rawKeys.push(withoutPrefix);
+      const basename = u.split('/').pop() || '';
+      if (basename) rawKeys.push(basename.replace(/^idb:/, ''));
+    }
+    if (input.id && typeof input.id === 'string') {
+      rawKeys.push(input.id.trim().replace(/^idb:/, ''));
+    }
+    if (input.local_url && typeof input.local_url === 'string') {
+      const basename = input.local_url.split('/').pop() || '';
+      if (basename) rawKeys.push(basename.replace(/^idb:/, ''));
+    }
+    if (input.name && typeof input.name === 'string') {
+      rawKeys.push(input.name.trim());
+    }
+  }
+
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+
+  for (const k of rawKeys) {
+    if (!k) continue;
+    const clean = sanitizeDocKey(k);
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      sanitized.push(clean);
+    }
+  }
+
+  return sanitized;
+}
+
+export async function saveIndexedDbMedia(id: string, dataUrl: string, secondaryFilename?: string): Promise<void> {
   if (!id || !dataUrl) return;
   const cleanId = id.replace(/^idb:/, '');
-  memoryCache.set(cleanId, dataUrl);
+  const candidateKeys = getMediaCandidateKeys({ id, file_url: secondaryFilename });
+
+  for (const k of candidateKeys) {
+    memoryCache.set(k, dataUrl);
+  }
 
   try {
     const db = await openMediaDB();
@@ -73,12 +126,17 @@ export async function saveIndexedDbMedia(id: string, dataUrl: string): Promise<v
 
   // Backup to cloud chunks so other devices (e.g. PC logging into same account) can access it
   saveMediaBinaryToFirestoreCloud(cleanId, dataUrl).catch(() => {});
+  if (secondaryFilename && secondaryFilename !== cleanId) {
+    saveMediaBinaryToFirestoreCloud(secondaryFilename, dataUrl).catch(() => {});
+  }
 }
 
 export async function saveMediaBinaryToFirestoreCloud(keyOrId: string, dataUrl: string): Promise<boolean> {
   try {
     if (!dataUrl || !dataUrl.startsWith('data:')) return false;
-    const cleanKey = sanitizeDocKey(keyOrId.replace(/^idb:/, ''));
+    const cleanKey = sanitizeDocKey(keyOrId.replace(/^idb:/, '').replace(/^\/uploads\//, ''));
+    if (!cleanKey) return false;
+
     const parts = dataUrl.split(',');
     if (parts.length < 2) return false;
 
@@ -86,8 +144,8 @@ export async function saveMediaBinaryToFirestoreCloud(keyOrId: string, dataUrl: 
     const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
     const base64Data = parts[1];
 
-    // Limit Firestore binary chunking to files <= 15 MB
-    if (base64Data.length > 20 * 1024 * 1024) return false;
+    // Limit Firestore binary chunking to files <= 35 MB
+    if (base64Data.length > 35 * 1024 * 1024) return false;
 
     const fs = getClientFirestore();
     const CHUNK_LEN = 700000; // ~700 KB per Firestore doc (well under 1 MB limit)
@@ -121,40 +179,65 @@ export async function saveMediaBinaryToFirestoreCloud(keyOrId: string, dataUrl: 
   }
 }
 
-export async function fetchMediaBinaryFromFirestoreCloud(keyOrId: string): Promise<string | null> {
-  const cleanKey = sanitizeDocKey(keyOrId.replace(/^idb:/, '').replace(/^\/uploads\//, ''));
-  if (activeCloudFetches.has(cleanKey)) {
-    return activeCloudFetches.get(cleanKey)!;
+export async function fetchMediaBinaryFromFirestoreCloud(keyOrIdOrMedia: any): Promise<string | null> {
+  const candidates = getMediaCandidateKeys(keyOrIdOrMedia);
+  if (candidates.length === 0) return null;
+
+  const primaryKey = candidates[0];
+  if (activeCloudFetches.has(primaryKey)) {
+    return activeCloudFetches.get(primaryKey)!;
   }
 
   const fetchPromise = (async () => {
     try {
       const fs = getClientFirestore();
-      const metaSnap = await getDoc(doc(fs, 'app_data', `mmeta_${cleanKey}`));
-      if (!metaSnap.exists()) return null;
 
-      const metaRaw = metaSnap.data()?.data;
-      if (!metaRaw) return null;
-      const meta = JSON.parse(metaRaw);
-      const totalChunks = Number(meta.totalChunks || 0);
+      // Try finding the metadata document across all candidates
+      let foundMeta: any = null;
+      let matchedKey: string | null = null;
+
+      for (const candidate of candidates) {
+        try {
+          const metaSnap = await getDoc(doc(fs, 'app_data', `mmeta_${candidate}`));
+          if (metaSnap.exists()) {
+            const raw = metaSnap.data()?.data;
+            if (raw) {
+              foundMeta = JSON.parse(raw);
+              matchedKey = candidate;
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      if (!foundMeta || !matchedKey) {
+        return null;
+      }
+
+      const totalChunks = Number(foundMeta.totalChunks || 0);
       if (totalChunks <= 0) return null;
 
       const parts: string[] = [];
       for (let i = 0; i < totalChunks; i++) {
-        const chunkSnap = await getDoc(doc(fs, 'app_data', `mbin_${cleanKey}_${i}`));
+        const chunkSnap = await getDoc(doc(fs, 'app_data', `mbin_${matchedKey}_${i}`));
         if (!chunkSnap.exists()) return null;
         parts.push(chunkSnap.data()?.data || '');
       }
 
       const fullBase64 = parts.join('');
-      const dataUrl = `data:${meta.mimeType || 'application/octet-stream'};base64,${fullBase64}`;
+      const dataUrl = `data:${foundMeta.mimeType || 'image/jpeg'};base64,${fullBase64}`;
 
-      // Save into local IndexedDB and memoryCache so subsequent renders are instantaneous
-      memoryCache.set(cleanKey, dataUrl);
+      // Save into local IndexedDB and memoryCache under all candidates so future renders are instant
+      for (const c of candidates) {
+        memoryCache.set(c, dataUrl);
+      }
       try {
         const db = await openMediaDB();
         const tx = db.transaction(STORE_NAME, 'readwrite');
-        tx.objectStore(STORE_NAME).put({ id: cleanKey, dataUrl, updatedAt: Date.now() });
+        const store = tx.objectStore(STORE_NAME);
+        for (const c of candidates) {
+          store.put({ id: c, dataUrl, updatedAt: Date.now() });
+        }
       } catch {}
 
       return dataUrl;
@@ -162,52 +245,71 @@ export async function fetchMediaBinaryFromFirestoreCloud(keyOrId: string): Promi
       console.warn('[Cloud Sync] Erro ao recuperar mídia do Firestore Cloud:', err?.message || err);
       return null;
     } finally {
-      activeCloudFetches.delete(cleanKey);
+      activeCloudFetches.delete(primaryKey);
     }
   })();
 
-  activeCloudFetches.set(cleanKey, fetchPromise);
+  activeCloudFetches.set(primaryKey, fetchPromise);
   return fetchPromise;
 }
 
-export async function getIndexedDbMedia(id: string): Promise<string | null> {
-  if (!id) return null;
-  const cleanId = id.replace(/^idb:/, '').replace(/^\/uploads\//, '');
+export async function getIndexedDbMedia(keyOrIdOrMedia: any): Promise<string | null> {
+  if (!keyOrIdOrMedia) return null;
+  const candidates = getMediaCandidateKeys(keyOrIdOrMedia);
+  if (candidates.length === 0) return null;
 
-  if (memoryCache.has(cleanId)) {
-    return memoryCache.get(cleanId)!;
+  // 1. Check memory cache first
+  for (const c of candidates) {
+    if (memoryCache.has(c)) {
+      return memoryCache.get(c)!;
+    }
   }
 
+  // 2. Check local browser IndexedDB
   try {
     const db = await openMediaDB();
-    const localResult = await new Promise<string | null>((resolve) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.get(cleanId);
+    for (const c of candidates) {
+      const localResult = await new Promise<string | null>((resolve) => {
+        try {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.get(c);
 
-      req.onsuccess = () => {
-        if (req.result?.dataUrl) {
-          memoryCache.set(cleanId, req.result.dataUrl);
-          resolve(req.result.dataUrl);
-        } else {
+          req.onsuccess = () => {
+            if (req.result?.dataUrl) {
+              resolve(req.result.dataUrl);
+            } else {
+              resolve(null);
+            }
+          };
+          req.onerror = () => resolve(null);
+        } catch {
           resolve(null);
         }
-      };
-      req.onerror = () => resolve(null);
-    });
+      });
 
-    if (localResult) return localResult;
+      if (localResult) {
+        for (const k of candidates) {
+          memoryCache.set(k, localResult);
+        }
+        return localResult;
+      }
+    }
   } catch {}
 
-  // If not found in local IndexedDB (e.g. user uploaded from phone, now viewing on PC),
-  // recover directly from Firestore cloud chunks!
-  const cloudResult = await fetchMediaBinaryFromFirestoreCloud(cleanId);
+  // 3. Not found locally: this device (PC or another phone) needs the cloud backup!
+  // Reconstruct seamlessly from Firestore cloud binary chunks
+  const cloudResult = await fetchMediaBinaryFromFirestoreCloud(keyOrIdOrMedia);
   return cloudResult;
 }
 
-export function getCachedIndexedDbMediaSync(id: string): string | null {
-  const cleanId = id.replace(/^idb:/, '').replace(/^\/uploads\//, '');
-  return memoryCache.get(cleanId) || null;
+export function getCachedIndexedDbMediaSync(keyOrIdOrMedia: any): string | null {
+  const candidates = getMediaCandidateKeys(keyOrIdOrMedia);
+  for (const c of candidates) {
+    const cached = memoryCache.get(c);
+    if (cached) return cached;
+  }
+  return null;
 }
 
 export async function deleteIndexedDbMedia(id: string): Promise<void> {
@@ -225,3 +327,4 @@ export async function deleteIndexedDbMedia(id: string): Promise<void> {
     });
   } catch {}
 }
+

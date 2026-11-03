@@ -47,15 +47,15 @@ function normalizeDbShape(parsed: any) {
     stores,
   };
 
-  // Hydrate idb: URLs if present in local IndexedDB
+  // Hydrate idb: URLs if present in local IndexedDB or cache
   if (Array.isArray(normalized.media)) {
     for (const m of normalized.media) {
-      if (typeof m.file_url === 'string' && m.file_url.startsWith('idb:')) {
-        const cached = getCachedIndexedDbMediaSync(m.id);
+      if (typeof m.file_url === 'string' && (m.file_url.startsWith('idb:') || m.file_url.startsWith('/uploads/'))) {
+        const cached = getCachedIndexedDbMediaSync(m);
         if (cached) {
           m.file_url = cached;
-        } else {
-          getIndexedDbMedia(m.id).then((val) => {
+        } else if (m.file_url.startsWith('idb:')) {
+          getIndexedDbMedia(m).then((val) => {
             if (val) m.file_url = val;
           }).catch(() => {});
         }
@@ -668,10 +668,8 @@ export async function handleClientFallbackRequest(
   if (pathOnly === '/company/media' && method === 'GET') {
     const list = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
     return list.map((m: any) => {
-      if (typeof m.file_url === 'string' && m.file_url.startsWith('idb:')) {
-        const cached = getCachedIndexedDbMediaSync(m.id);
-        if (cached) return { ...m, file_url: cached };
-      }
+      const cached = getCachedIndexedDbMediaSync(m);
+      if (cached) return { ...m, file_url: cached };
       return m;
     });
   }
@@ -1704,7 +1702,7 @@ export async function handleClientFallbackRequest(
     } else {
       // Local device storage: persist in IndexedDB for fast, high-capacity client playback
       if (resolvedDataUrl) {
-        await saveIndexedDbMedia(newMediaId, resolvedDataUrl);
+        await saveIndexedDbMedia(newMediaId, resolvedDataUrl, uploadedFilename || filename);
       }
       targetUrl = resolvedDataUrl;
       mediaSource = 'device';

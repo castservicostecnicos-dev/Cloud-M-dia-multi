@@ -44,10 +44,57 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
   onPreview,
 }) => {
   const [hasError, setHasError] = useState(false);
+  const [isRecovering, setIsRecovering] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolveMediaDisplayUrl(media.file_url));
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const initial = resolveMediaDisplayUrl(media.file_url);
+    if (initial && initial.startsWith('data:')) {
+      setResolvedSrc(initial);
+      return;
+    }
+    // Proactively check local cache or Firestore cloud binary if file_url is idb: or local upload
+    getIndexedDbMedia(media).then((recovered) => {
+      if (recovered && isMounted) {
+        setResolvedSrc(recovered);
+        setHasError(false);
+      }
+    }).catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [media.id, media.file_url]);
+
+  const handleMediaError = (target: HTMLImageElement | HTMLVideoElement) => {
+    const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
+    if (driveId && !(target.src || '').includes('thumbnail') && !(target.src || '').includes('uc?')) {
+      target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+      return;
+    }
+    if ((media as any).local_url && target.src !== (media as any).local_url) {
+      target.src = (media as any).local_url;
+      return;
+    }
+
+    setIsRecovering(true);
+    getIndexedDbMedia(media)
+      .then((recovered) => {
+        if (recovered && target.src !== recovered) {
+          setResolvedSrc(recovered);
+          target.src = recovered;
+          setHasError(false);
+        } else {
+          setHasError(true);
+        }
+      })
+      .catch(() => setHasError(true))
+      .finally(() => setIsRecovering(false));
+  };
 
   // Determine media extension or format label
   const getFormatLabel = () => {
@@ -216,7 +263,7 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
           <>
             <video
               ref={videoRef}
-              src={displayUrl}
+              src={resolvedSrc || displayUrl}
               muted
               playsInline
               preload="metadata"
@@ -224,28 +271,12 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
                 const d = Math.round((e.target as HTMLVideoElement).duration);
                 if (!isNaN(d) && d > 0) setVideoDuration(d);
               }}
-              onError={(e) => {
-                const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
-                const target = e.currentTarget;
-                if (driveId && !(target.src || '').includes('uc?export=download')) {
-                  target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
-                } else if ((media as any).local_url && target.src !== (media as any).local_url) {
-                  target.src = (media as any).local_url;
-                } else {
-                  getIndexedDbMedia(media.id || media.file_url).then((recovered) => {
-                    if (recovered && target.src !== recovered) {
-                      target.src = recovered;
-                    } else {
-                      setHasError(true);
-                    }
-                  }).catch(() => setHasError(true));
-                }
-              }}
+              onError={(e) => handleMediaError(e.currentTarget)}
               className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
 
             {/* Video Play Badge / Indicator */}
-            {!isVideoPlaying && (
+            {!isVideoPlaying && !isRecovering && (
               <div className="absolute inset-0 bg-black/25 flex items-center justify-center pointer-events-none transition-opacity group-hover:bg-black/15">
                 <div className="h-9 w-9 rounded-full bg-slate-900/80 border border-slate-700/80 text-white flex items-center justify-center shadow-md backdrop-blur-xs group-hover:scale-110 group-hover:bg-blue-600 group-hover:border-blue-500 transition">
                   <Play className="h-4 w-4 ml-0.5 fill-current text-white" />
@@ -258,6 +289,13 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
               <div className="absolute top-2 left-2 z-10 flex items-center gap-1 rounded bg-black/75 px-1.5 py-0.5 text-[9px] font-bold text-emerald-400 border border-emerald-500/50 backdrop-blur-xs">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
                 <span>Reproduzindo</span>
+              </div>
+            )}
+
+            {isRecovering && (
+              <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center gap-1.5 z-20">
+                <div className="h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <span className="text-[10px] text-blue-300 font-medium">Carregando da nuvem...</span>
               </div>
             )}
           </>
@@ -309,31 +347,21 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
       className={`relative w-full ${aspectClass} bg-slate-950 flex items-center justify-center overflow-hidden group select-none ${className}`}
     >
       {!hasError ? (
-        <img
-          src={displayUrl}
-          alt={media.name}
-          referrerPolicy="no-referrer"
-          onError={(e) => {
-            const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
-            const target = e.currentTarget;
-            if (driveId && !(target.src || '').includes('thumbnail')) {
-              target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
-            } else if (driveId && !(target.src || '').includes('uc?id=')) {
-              target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
-            } else if ((media as any).local_url && target.src !== (media as any).local_url) {
-              target.src = (media as any).local_url;
-            } else {
-              getIndexedDbMedia(media.id || media.file_url).then((recovered) => {
-                if (recovered && target.src !== recovered) {
-                  target.src = recovered;
-                } else {
-                  setHasError(true);
-                }
-              }).catch(() => setHasError(true));
-            }
-          }}
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-        />
+        <>
+          <img
+            src={resolvedSrc || displayUrl}
+            alt={media.name}
+            referrerPolicy="no-referrer"
+            onError={(e) => handleMediaError(e.currentTarget)}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+          />
+          {isRecovering && (
+            <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center gap-1.5 z-20">
+              <div className="h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-[10px] text-blue-300 font-medium">Carregando da nuvem...</span>
+            </div>
+          )}
+        </>
       ) : (
         <div className="flex flex-col items-center justify-center text-center p-3 text-slate-500">
           <ImageIcon className="h-8 w-8 mb-1 text-slate-600" />

@@ -34,7 +34,7 @@ async function startServer() {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
 
-  const recoverUploadIfMissing: express.RequestHandler = async (req, _res, next) => {
+  const recoverUploadIfMissing: express.RequestHandler = async (req, res, next) => {
     try {
       const requestedFile = path.basename(req.path || '');
       if (!requestedFile || requestedFile.includes('..')) {
@@ -45,12 +45,24 @@ async function startServer() {
         return next();
       }
 
+      const ext = path.extname(requestedFile).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif',
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+      };
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+
       // 1. Try restoring from Firestore binary chunks
       const cloudBuffer = await loadMediaBinaryFromFirestore(requestedFile);
       if (cloudBuffer && cloudBuffer.length > 0) {
         fs.writeFileSync(localFilePath, cloudBuffer);
         console.log(`[Media Recovery] Restored ${requestedFile} (${cloudBuffer.length} bytes) from Firestore.`);
-        return next();
+        return res.type(contentType).sendFile(localFilePath);
       }
 
       // 2. Try restoring from Google Drive if media has drive_file_id
@@ -79,7 +91,7 @@ async function startServer() {
           if (buf.length > 0) {
             fs.writeFileSync(localFilePath, buf);
             console.log(`[Media Recovery] Restored ${requestedFile} (${buf.length} bytes) from Google Drive.`);
-            return next();
+            return res.type(contentType).sendFile(localFilePath);
           }
         }
       }

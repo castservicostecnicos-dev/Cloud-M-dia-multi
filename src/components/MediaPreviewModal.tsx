@@ -22,6 +22,7 @@ import { Media } from '../types';
 import { WeatherClockMedia } from './WeatherClockMedia';
 import { RssNewsMedia } from './RssNewsMedia';
 import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
+import { getIndexedDbMedia } from '../lib/indexedDbMedia';
 
 interface MediaPreviewModalProps {
   media: Media | null;
@@ -47,7 +48,27 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
   const [imageError, setImageError] = useState(false);
   const [videoError, setVideoError] = useState(false);
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolveMediaDisplayUrl(media.file_url));
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  React.useEffect(() => {
+    let isMounted = true;
+    const initial = resolveMediaDisplayUrl(media.file_url);
+    if (initial && initial.startsWith('data:')) {
+      setResolvedSrc(initial);
+      return;
+    }
+    getIndexedDbMedia(media).then((rec) => {
+      if (rec && isMounted) {
+        setResolvedSrc(rec);
+        setImageError(false);
+        setVideoError(false);
+      }
+    }).catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [media.id, media.file_url]);
 
   const formatSeconds = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -147,7 +168,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
               {!videoError ? (
                 <video
                   ref={videoRef}
-                  src={resolveMediaDisplayUrl(media.file_url)}
+                  src={resolvedSrc || resolveMediaDisplayUrl(media.file_url)}
                   autoPlay
                   controls
                   playsInline
@@ -161,23 +182,33 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                   }}
                   onPlay={() => setIsPlaying(true)}
                   onError={(e) => {
-                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
                     const target = e.currentTarget;
+                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
                     if (driveId && !(target.src || '').includes('uc?export=download')) {
                       target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
-                    } else if ((media as any).local_url && target.src !== (media as any).local_url) {
-                      target.src = (media as any).local_url;
-                    } else {
-                      setVideoError(true);
+                      return;
                     }
+                    if ((media as any).local_url && target.src !== (media as any).local_url) {
+                      target.src = (media as any).local_url;
+                      return;
+                    }
+                    getIndexedDbMedia(media).then((rec) => {
+                      if (rec && target.src !== rec) {
+                        setResolvedSrc(rec);
+                        target.src = rec;
+                        setVideoError(false);
+                      } else {
+                        setVideoError(true);
+                      }
+                    }).catch(() => setVideoError(true));
                   }}
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400 max-w-md">
                   <Film className="h-12 w-12 text-blue-400 mb-3" />
-                  <p className="text-sm font-semibold text-white mb-1">Vídeo armazenado no Google Drive</p>
+                  <p className="text-sm font-semibold text-white mb-1">Vídeo armazenado na Nuvem</p>
                   <p className="text-xs text-slate-400 mb-4">
-                    Abra o vídeo diretamente no Google Drive para reproduzir com alta velocidade e qualidade total.
+                    Abra o vídeo diretamente pela Nuvem para reproduzir com alta velocidade e qualidade total.
                   </p>
                   <a
                     href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
@@ -186,7 +217,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                     className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
                   >
                     <HardDrive className="h-4 w-4" />
-                    <span>Reproduzir no Google Drive</span>
+                    <span>Reproduzir na Nuvem</span>
                     <ExternalLink className="h-3.5 w-3.5" />
                   </a>
                 </div>
@@ -199,7 +230,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             <div className="w-full h-full flex items-center justify-center p-2 bg-radial from-slate-950 to-black overflow-auto">
               {!imageError ? (
                 <img
-                  src={resolveMediaDisplayUrl(media.file_url)}
+                  src={resolvedSrc || resolveMediaDisplayUrl(media.file_url)}
                   alt={media.name}
                   referrerPolicy="no-referrer"
                   onLoad={(e) => {
@@ -207,26 +238,38 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                     setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
                   }}
                   onError={(e) => {
-                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
                     const target = e.currentTarget;
+                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
                     if (driveId && !(target.src || '').includes('thumbnail')) {
                       target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
-                    } else if (driveId && !(target.src || '').includes('uc?id=')) {
-                      target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
-                    } else if ((media as any).local_url && target.src !== (media as any).local_url) {
-                      target.src = (media as any).local_url;
-                    } else {
-                      setImageError(true);
+                      return;
                     }
+                    if (driveId && !(target.src || '').includes('uc?id=')) {
+                      target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
+                      return;
+                    }
+                    if ((media as any).local_url && target.src !== (media as any).local_url) {
+                      target.src = (media as any).local_url;
+                      return;
+                    }
+                    getIndexedDbMedia(media).then((rec) => {
+                      if (rec && target.src !== rec) {
+                        setResolvedSrc(rec);
+                        target.src = rec;
+                        setImageError(false);
+                      } else {
+                        setImageError(true);
+                      }
+                    }).catch(() => setImageError(true));
                   }}
                   className="max-w-full max-h-[64vh] object-contain rounded-lg shadow-xl"
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400 max-w-md">
                   <ImageIcon className="h-12 w-12 text-blue-400 mb-3" />
-                  <p className="text-sm font-semibold text-white mb-1">Imagem armazenada no Google Drive</p>
+                  <p className="text-sm font-semibold text-white mb-1">Imagem armazenada na Nuvem</p>
                   <p className="text-xs text-slate-400 mb-4">
-                    Abra a imagem diretamente na nuvem do Google Drive para visualização em alta definição.
+                    Abra a imagem diretamente na Nuvem para visualização em alta definição.
                   </p>
                   <a
                     href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
@@ -235,7 +278,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                     className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
                   >
                     <HardDrive className="h-4 w-4" />
-                    <span>Visualizar no Google Drive</span>
+                    <span>Visualizar na Nuvem</span>
                     <ExternalLink className="h-3.5 w-3.5" />
                   </a>
                 </div>

@@ -34,6 +34,7 @@ import { WeatherClockMedia } from '../components/WeatherClockMedia';
 import { RssNewsMedia } from '../components/RssNewsMedia';
 import { cleanRssText } from '../lib/rssCleaner';
 import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
+import { getIndexedDbMedia } from '../lib/indexedDbMedia';
 
 interface PlayerViewProps {
   onExit?: () => void;
@@ -1020,8 +1021,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                 playsInline
                 onEnded={handleVideoEnded}
                 onError={(e) => {
-                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
                   const target = e.currentTarget;
+                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
                   if (driveId && !(target.src || '').includes('uc?export=download')) {
                     target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
                     return;
@@ -1030,10 +1031,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                     target.src = (currentMedia as any).local_url;
                     return;
                   }
-                  console.warn('Erro ao reproduzir vídeo ou codec offline, avançando para próxima mídia:', e);
-                  setTimeout(() => {
-                    advanceNextMedia();
-                  }, 2000);
+                  getIndexedDbMedia(currentMedia).then((rec) => {
+                    if (rec && target.src !== rec) {
+                      target.src = rec;
+                    } else {
+                      console.warn('Erro ao reproduzir vídeo ou codec offline, avançando para próxima mídia:', e);
+                      setTimeout(() => {
+                        advanceNextMedia();
+                      }, 2000);
+                    }
+                  }).catch(() => {
+                    setTimeout(() => {
+                      advanceNextMedia();
+                    }, 2000);
+                  });
                 }}
                 className="h-full w-full object-cover"
               />
@@ -1061,8 +1072,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                 alt={currentMedia?.name}
                 referrerPolicy="no-referrer"
                 onError={(e) => {
-                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
                   const target = e.currentTarget;
+                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
                   if (driveId && !(target.src || '').includes('thumbnail')) {
                     target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
                     return;
@@ -1075,10 +1086,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                     target.src = (currentMedia as any).local_url;
                     return;
                   }
-                  console.warn('Erro ao carregar imagem, avançando:', e);
-                  setTimeout(() => {
-                    advanceNextMedia();
-                  }, 2500);
+                  getIndexedDbMedia(currentMedia).then((rec) => {
+                    if (rec && target.src !== rec) {
+                      target.src = rec;
+                    } else {
+                      console.warn('Erro ao carregar imagem, avançando:', e);
+                      setTimeout(() => {
+                        advanceNextMedia();
+                      }, 2500);
+                    }
+                  }).catch(() => {
+                    setTimeout(() => {
+                      advanceNextMedia();
+                    }, 2500);
+                  });
                 }}
                 className="h-full w-full object-cover"
               />
