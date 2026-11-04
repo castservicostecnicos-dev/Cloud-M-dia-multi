@@ -81,6 +81,13 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
       return;
     }
 
+    if (media.type === 'video' && media.id && !(target.src || '').includes('/api/media/stream/')) {
+      const streamUrl = `/api/media/stream/${media.id}`;
+      target.src = streamUrl;
+      setResolvedSrc(streamUrl);
+      return;
+    }
+
     setIsRecovering(true);
     getIndexedDbMedia(media)
       .then((recovered) => {

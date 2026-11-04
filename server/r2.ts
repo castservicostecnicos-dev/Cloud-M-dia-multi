@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   ListObjectsV2Command,
   DeleteObjectCommand,
+  GetObjectCommand,
 } from '@aws-sdk/client-s3';
 import { db } from './db';
 import { R2Settings } from '../src/types';
@@ -207,4 +208,55 @@ export async function deleteFromR2(keyOrUrl: string): Promise<boolean> {
     return false;
   }
 }
+
+export async function getObjectFromR2(keyOrUrl: string, range?: string): Promise<{
+  body: any;
+  contentLength?: number;
+  contentType?: string;
+  contentRange?: string;
+  acceptRanges?: string;
+  status: number;
+} | null> {
+  try {
+    const config = getEffectiveR2Config();
+    if (!isR2Configured(config)) return null;
+
+    let key = keyOrUrl.trim();
+    if (key.includes('://')) {
+      try {
+        const parsed = new URL(key);
+        key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+      } catch {
+        key = key.split('/').pop() || key;
+      }
+    } else {
+      key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
+    }
+
+    if (!key || key.startsWith('widget:') || key.startsWith('data:') || key.startsWith('idb:')) {
+      return null;
+    }
+
+    const client = createR2Client(config);
+    const command = new GetObjectCommand({
+      Bucket: config.bucket_name,
+      Key: key,
+      Range: range || undefined,
+    });
+
+    const res = await client.send(command);
+    return {
+      body: res.Body,
+      contentLength: res.ContentLength,
+      contentType: res.ContentType,
+      contentRange: res.ContentRange,
+      acceptRanges: res.AcceptRanges,
+      status: range && res.ContentRange ? 206 : 200,
+    };
+  } catch (err: any) {
+    console.warn('[Cloudflare R2] Falha ao obter objeto para streaming:', keyOrUrl, err?.message || err);
+    return null;
+  }
+}
+
 

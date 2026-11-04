@@ -1789,25 +1789,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setUploadProgressStatus('Preparando envio...');
       const createdMedias: Media[] = [];
 
-      // Para mídias do dispositivo, o upload salva na biblioteca sem vincular a playlists antecipadamente
-      // O usuário escolherá as playlists e o tempo depois via "Escolher Playlists" no card da mídia
       const isTargetAllPlaylists =
-        mediaSourceType === 'device'
-          ? false
-          : uploadToAllPlaylists ||
-            targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
-            (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
+        uploadToAllPlaylists ||
+        targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
+        (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
 
-      const targetPlIds =
-        mediaSourceType === 'device'
-          ? []
-          : isTargetAllPlaylists
-          ? playlists.map((p) => p.id)
-          : targetPlaylistIdsForNewMedia.length > 0
-          ? targetPlaylistIdsForNewMedia
-          : targetPlaylistIdForNewMedia
-          ? [targetPlaylistIdForNewMedia]
-          : (editingPlaylist ? [editingPlaylist.id] : []);
+      const targetPlIds = isTargetAllPlaylists
+        ? playlists.map((p) => p.id)
+        : targetPlaylistIdsForNewMedia.length > 0
+        ? targetPlaylistIdsForNewMedia
+        : targetPlaylistIdForNewMedia
+        ? [targetPlaylistIdForNewMedia]
+        : (editingPlaylist ? [editingPlaylist.id] : []);
 
       if (mediaSourceType === 'device') {
         if (selectedDeviceFiles.length === 0) {
@@ -1837,7 +1830,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               name: fileTitle,
               duration: Number(fileItem.duration) || (fileItem.isVideo ? 15 : 10),
               companyId: currentCompanyId,
-              addToAllPlaylists: false,
+              addToAllPlaylists: isTargetAllPlaylists,
               clientDriveToken: currentToken,
               onProgress: (pct) => {
                 const stepBase = (i / totalFiles) * 100;
@@ -1968,15 +1961,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         await handleRestartPlayers({});
       }
 
+      const plMsg = targetPlIds.length > 0
+        ? ` e vinculada(s) a ${targetPlIds.length} playlist(s)`
+        : '';
       showToast(
         'success',
-        mediaSourceType === 'device'
-          ? (createdMedias.length === 1
-              ? `Mídia "${createdMedias[0].name}" salva na biblioteca! Escolha as playlists no card da mídia.`
-              : `${createdMedias.length} mídias salvas na biblioteca! Escolha as playlists no card de cada mídia.`)
-          : (createdMedias.length === 1
-              ? `Mídia "${createdMedias[0].name}" enviada e sincronizada na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`
-              : `${createdMedias.length} mídias enviadas e sincronizadas na nuvem com sucesso!${andRestart ? ' Telas reiniciadas.' : ''}`)
+        createdMedias.length === 1
+          ? `Mídia "${createdMedias[0].name}" enviada e salva na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
+          : `${createdMedias.length} mídias enviadas e salvas na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
       );
 
       setMediaModalOpen(false);

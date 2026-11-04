@@ -42,7 +42,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   if (!media) return null;
 
   const [isPlaying, setIsPlaying] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState<number>(0);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
@@ -166,60 +166,110 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
           {media.type === 'video' && (
             <div className="w-full h-full flex flex-col items-center justify-center bg-black relative">
               {!videoError ? (
-                <video
-                  ref={videoRef}
-                  src={resolvedSrc || resolveMediaDisplayUrl(media.file_url)}
-                  autoPlay
-                  controls
-                  playsInline
-                  className="w-full h-full max-h-[64vh] object-contain"
-                  onLoadedMetadata={(e) => {
-                    const target = e.target as HTMLVideoElement;
-                    setVideoDuration(Math.round(target.duration));
-                  }}
-                  onTimeUpdate={(e) => {
-                    setVideoCurrentTime(Math.round((e.target as HTMLVideoElement).currentTime));
-                  }}
-                  onPlay={() => setIsPlaying(true)}
-                  onError={(e) => {
-                    const target = e.currentTarget;
-                    const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
-                    if (driveId && !(target.src || '').includes('uc?export=download')) {
-                      target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
-                      return;
-                    }
-                    if ((media as any).local_url && target.src !== (media as any).local_url) {
-                      target.src = (media as any).local_url;
-                      return;
-                    }
-                    getIndexedDbMedia(media).then((rec) => {
-                      if (rec && target.src !== rec) {
-                        setResolvedSrc(rec);
-                        target.src = rec;
-                        setVideoError(false);
-                      } else {
-                        setVideoError(true);
+                <>
+                  <video
+                    ref={videoRef}
+                    src={resolvedSrc || resolveMediaDisplayUrl(media.file_url)}
+                    autoPlay
+                    controls
+                    muted={isMuted}
+                    playsInline
+                    className="w-full h-full max-h-[64vh] object-contain"
+                    onLoadedMetadata={(e) => {
+                      const target = e.target as HTMLVideoElement;
+                      setVideoDuration(Math.round(target.duration));
+                    }}
+                    onTimeUpdate={(e) => {
+                      setVideoCurrentTime(Math.round((e.target as HTMLVideoElement).currentTime));
+                    }}
+                    onPlay={() => setIsPlaying(true)}
+                    onError={(e) => {
+                      const target = e.currentTarget;
+                      const streamProxyUrl = `/api/media/stream/${media.id}`;
+                      if (target.src && !target.src.includes('/api/media/stream/')) {
+                        target.src = streamProxyUrl;
+                        setResolvedSrc(streamProxyUrl);
+                        return;
                       }
-                    }).catch(() => setVideoError(true));
-                  }}
-                />
+
+                      const driveId = media.drive_file_id || extractDriveFileId(media.file_url);
+                      if (driveId && !(target.src || '').includes('uc?export=download')) {
+                        target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                        return;
+                      }
+                      if ((media as any).local_url && target.src !== (media as any).local_url) {
+                        target.src = (media as any).local_url;
+                        return;
+                      }
+                      getIndexedDbMedia(media).then((rec) => {
+                        if (rec && target.src !== rec) {
+                          setResolvedSrc(rec);
+                          target.src = rec;
+                          setVideoError(false);
+                        } else {
+                          setVideoError(true);
+                        }
+                      }).catch(() => setVideoError(true));
+                    }}
+                  />
+                  {/* Floating Audio Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !isMuted;
+                      setIsMuted(next);
+                      if (videoRef.current) videoRef.current.muted = next;
+                    }}
+                    className="absolute top-3 right-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/75 hover:bg-black/90 text-white text-xs font-semibold backdrop-blur-md border border-slate-700/80 transition shadow-lg cursor-pointer"
+                    title={isMuted ? 'Ativar Áudio' : 'Desativar Áudio'}
+                  >
+                    {isMuted ? (
+                      <>
+                        <VolumeX className="h-4 w-4 text-rose-400" />
+                        <span>Ativar Som</span>
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="h-4 w-4 text-emerald-400" />
+                        <span>Som Ativo</span>
+                      </>
+                    )}
+                  </button>
+                </>
               ) : (
                 <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400 max-w-md">
                   <Film className="h-12 w-12 text-blue-400 mb-3" />
-                  <p className="text-sm font-semibold text-white mb-1">Vídeo armazenado na Nuvem</p>
+                  <p className="text-sm font-semibold text-white mb-1">Visualização de Vídeo</p>
                   <p className="text-xs text-slate-400 mb-4">
-                    Abra o vídeo diretamente pela Nuvem para reproduzir com alta velocidade e qualidade total.
+                    Tente recarregar o vídeo diretamente via servidor ou abrir na nuvem.
                   </p>
-                  <a
-                    href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
-                  >
-                    <HardDrive className="h-4 w-4" />
-                    <span>Reproduzir na Nuvem</span>
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVideoError(false);
+                        const proxyUrl = `/api/media/stream/${media.id}?t=${Date.now()}`;
+                        setResolvedSrc(proxyUrl);
+                        if (videoRef.current) {
+                          videoRef.current.src = proxyUrl;
+                          videoRef.current.load();
+                        }
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg transition cursor-pointer"
+                    >
+                      <span>Tentar Novamente</span>
+                    </button>
+                    <a
+                      href={media.drive_view_url || (media.drive_file_id ? `https://drive.google.com/file/d/${media.drive_file_id}/view` : media.file_url)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg transition"
+                    >
+                      <HardDrive className="h-4 w-4" />
+                      <span>Abrir na Nuvem</span>
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </div>
                 </div>
               )}
             </div>

@@ -1031,6 +1031,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                     target.src = (currentMedia as any).local_url;
                     return;
                   }
+                  if (currentMedia?.id && !(target.src || '').includes('/api/media/stream/')) {
+                    target.src = `/api/media/stream/${currentMedia.id}`;
+                    return;
+                  }
                   getIndexedDbMedia(currentMedia).then((rec) => {
                     if (rec && target.src !== rec) {
                       target.src = rec;

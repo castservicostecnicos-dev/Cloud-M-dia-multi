@@ -29,13 +29,14 @@ import {
 } from './db.js';
 import { realtimeHub } from './realtime.js';
 import { runMediaIntegrityAudit, MediaIntegrityAuditReport } from './mediaIntegrity.js';
-import { saveMediaBinaryToFirestore, deleteMediaBinaryFromFirestore } from './firestore.js';
+import { saveMediaBinaryToFirestore, deleteMediaBinaryFromFirestore, loadMediaBinaryFromFirestore } from './firestore.js';
 import {
   uploadToR2,
   getEffectiveR2Config,
   isR2Configured,
   testR2Connection,
   deleteFromR2,
+  getObjectFromR2,
   buildR2PublicUrl,
   sanitizeR2AccountId,
   sanitizeR2BucketName,
@@ -1812,35 +1813,44 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[]): Playli
   };
 }
 
-apiRouter.get('/company/playlists', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.get('/company/playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
-  const injected = ensureCompanyDefaultMedia(companyId, data);
-  if (injected) {
-    db.persist();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
+    : req.user!.company_id!;
+
+  if (companyId) {
+    const injected = ensureCompanyDefaultMedia(companyId, data);
+    if (injected) {
+      db.persist();
+    }
   }
-  const playlists = data.playlists
-    .filter((p) => p.company_id === companyId)
-    .map((p) => {
-      const enriched = enrichPlaylistWithMedia(p, data.media);
-      const store = (data.company_stores || []).find((s) => s.id === p.store_id);
-      return {
-        ...enriched,
-        store_name: store?.name || undefined,
-      };
-    });
+
+  const playlists = (companyId
+    ? data.playlists.filter((p) => p.company_id === companyId)
+    : data.playlists
+  ).map((p) => {
+    const enriched = enrichPlaylistWithMedia(p, data.media);
+    const store = (data.company_stores || []).find((s) => s.id === p.store_id);
+    return {
+      ...enriched,
+      store_name: store?.name || undefined,
+    };
+  });
   res.json(playlists);
 });
 
-apiRouter.post('/company/playlists', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+  const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
   const { name, description, weather_city, items } = req.body;
 
   if (!name) {
     return res.status(400).json({ error: 'Nome da playlist é obrigatório.' });
   }
 
-  const data = db.getData();
   const now = new Date().toISOString();
   const playlistId = `pl-${Date.now()}`;
 
@@ -1893,30 +1903,32 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company'), (req: 
   data.playlists.push(newPlaylist);
   db.persist();
 
-  if (req.body.restartPlayers) {
-    try {
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
+    if (req.body.restartPlayers) {
       realtimeHub.sendRestartCommand({
         playlistId: newPlaylist.id,
         companyId,
         reason: `Nova playlist "${newPlaylist.name}" criada com mídias`,
       });
-    } catch (e) {
-      console.warn('Falha ao disparar reinicialização de nova playlist:', e);
     }
+  } catch (e) {
+    console.warn('Falha ao disparar broadcast de nova playlist:', e);
   }
 
   res.status(201).json(enrichPlaylistWithMedia(newPlaylist, data.media));
 });
 
-apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const data = db.getData();
-  const playlist = data.playlists.find((p) => p.id === id && p.company_id === companyId);
+  const playlist = data.playlists.find((p) => p.id === id && (user.role === 'admin' || p.company_id === user.company_id));
   if (!playlist) {
     return res.status(404).json({ error: 'Playlist não encontrada.' });
   }
 
+  const companyId = playlist.company_id;
   const { name, description, weather_city, items, active } = req.body;
   if (name) playlist.name = name;
   if (description !== undefined) playlist.description = description;
@@ -1965,27 +1977,28 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company'), (re
 
   db.persist();
 
-  // Automatically broadcast restart/reload command to connected players when playlist items are modified
-  if (items || req.body.restartPlayers) {
-    try {
+  // Automatically broadcast restart/reload command to connected players and sync dashboards
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
+    if (items || req.body.restartPlayers) {
       realtimeHub.sendRestartCommand({
         playlistId: playlist.id,
         companyId,
         reason: `Playlist "${playlist.name}" atualizada com novas mídias`,
       });
-    } catch (e) {
-      console.warn('Falha ao disparar reinicialização automática de playlist:', e);
     }
+  } catch (e) {
+    console.warn('Falha ao disparar sincronização de playlist:', e);
   }
 
   res.json(enrichPlaylistWithMedia(playlist, data.media));
 });
 
-apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const data = db.getData();
-  const playlist = data.playlists.find((p) => p.id === id && p.company_id === companyId);
+  const playlist = data.playlists.find((p) => p.id === id && (user.role === 'admin' || p.company_id === user.company_id));
   if (!playlist) {
     return res.status(404).json({ error: 'Playlist não encontrada.' });
   }
@@ -1994,21 +2007,31 @@ apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole(
   playlist.updated_at = new Date().toISOString();
   db.persist();
 
+  try {
+    realtimeHub.broadcastMediaChange(playlist.company_id, 'updated');
+    realtimeHub.sendRestartCommand({
+      playlistId: playlist.id,
+      companyId: playlist.company_id,
+      reason: playlist.active ? 'Playlist ativada' : 'Playlist desativada',
+    });
+  } catch {}
+
   res.json({
     message: playlist.active ? 'Playlist ativada com sucesso.' : 'Playlist desativada com sucesso.',
     active: playlist.active,
   });
 });
 
-apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const data = db.getData();
-  const idx = data.playlists.findIndex((p) => p.id === id && p.company_id === companyId);
+  const idx = data.playlists.findIndex((p) => p.id === id && (user.role === 'admin' || p.company_id === user.company_id));
   if (idx === -1) {
     return res.status(404).json({ error: 'Playlist não encontrada.' });
   }
 
+  const companyId = data.playlists[idx].company_id;
   data.playlists.splice(idx, 1);
   // Unlink from players
   for (const player of data.players) {
@@ -2018,21 +2041,32 @@ apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company'), 
   }
   db.persist();
 
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
+    realtimeHub.sendRestartCommand({
+      playlistId: id,
+      companyId,
+      reason: 'Playlist excluída',
+    });
+  } catch {}
+
   res.json({ message: 'Playlist excluída com sucesso.' });
 });
 
 // Quick add Weather/Clock to playlist
-apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
-  const { playlist_id, duration } = req.body;
+apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
+  const { playlist_id, duration } = req.body;
   const now = new Date().toISOString();
 
   ensureCompanyDefaultMedia(companyId, data, now);
 
   const playlist = playlist_id
-    ? data.playlists.find((p) => p.id === playlist_id && p.company_id === companyId)
-    : data.playlists.find((p) => p.company_id === companyId);
+    ? data.playlists.find((p) => p.id === playlist_id && (req.user!.role === 'admin' || p.company_id === companyId))
+    : data.playlists.find((p) => req.user!.role === 'admin' || p.company_id === companyId);
 
   if (!playlist) {
     return res.status(404).json({ error: 'Nenhuma playlist encontrada para esta empresa.' });
@@ -2068,6 +2102,15 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
   playlist.updated_at = now;
   db.persist();
 
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
+    realtimeHub.sendRestartCommand({
+      playlistId: playlist.id,
+      companyId,
+      reason: 'Hora Certa adicionada à playlist',
+    });
+  } catch {}
+
   res.json({
     message: 'Hora Certa & Previsão do Tempo incluída com sucesso na playlist!',
     playlist,
@@ -2076,19 +2119,21 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
 });
 
 // Quick add RSS news feed to playlist
-apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+  const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
   const { playlist_id, rss_url, name, duration } = req.body;
   if (!rss_url) {
     return res.status(400).json({ error: 'URL do Feed RSS é obrigatória.' });
   }
 
-  const data = db.getData();
   const now = new Date().toISOString();
 
   const playlist = playlist_id
-    ? data.playlists.find((p) => p.id === playlist_id && p.company_id === companyId)
-    : data.playlists.find((p) => p.company_id === companyId);
+    ? data.playlists.find((p) => p.id === playlist_id && (req.user!.role === 'admin' || p.company_id === companyId))
+    : data.playlists.find((p) => req.user!.role === 'admin' || p.company_id === companyId);
 
   if (!playlist) {
     return res.status(404).json({ error: 'Nenhuma playlist encontrada para esta empresa.' });
@@ -2126,6 +2171,15 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
   playlist.items.push(newItem);
   playlist.updated_at = now;
   db.persist();
+
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
+    realtimeHub.sendRestartCommand({
+      playlistId: playlist.id,
+      companyId,
+      reason: `Notícias RSS "${rssMedia.name}" adicionadas à playlist`,
+    });
+  } catch {}
 
   res.json({
     message: `Notícias RSS "${rssMedia.name}" incluídas na playlist "${playlist.name}"!`,
@@ -2692,17 +2746,18 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 });
 
 // Adicionar uma mídia existente a TODAS as playlists da empresa de uma só vez
-apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const { duration, restartPlayers, forceDuplicate } = req.body || {};
   const data = db.getData();
 
-  const media = data.media.find((m) => m.id === id && m.company_id === companyId);
+  const media = data.media.find((m) => m.id === id && (user.role === 'admin' || m.company_id === user.company_id));
   if (!media) {
     return res.status(404).json({ error: 'Mídia não encontrada na biblioteca da sua empresa.' });
   }
 
+  const companyId = media.company_id;
   const companyPlaylists = data.playlists.filter((p) => p.company_id === companyId);
   if (companyPlaylists.length === 0) {
     return res.status(400).json({ error: 'Nenhuma playlist cadastrada para esta empresa. Crie uma playlist primeiro.' });
@@ -5230,6 +5285,113 @@ apiRouter.get('/drive/stream/:fileId', async (req, res) => {
   } catch (err: any) {
     console.error(`[Drive Stream] Error streaming ${fileId}:`, err?.message);
     res.redirect(302, `https://lh3.googleusercontent.com/d/${fileId}`);
+  }
+});
+
+// Universal media streaming proxy for videos and high-res media (Cloudflare R2, local files, and Firestore chunks)
+// Solves browser autoplay restrictions, CORS headers, and supports HTTP Range (206 Partial Content) requests
+apiRouter.get('/media/stream/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).send('Media ID missing');
+
+    const data = db.getData();
+    const media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)));
+    const rangeHeader = req.headers.range;
+
+    // 1. Try local file in uploadsDir if present
+    let localFilename = '';
+    if (media?.file_url?.startsWith('/uploads/')) {
+      localFilename = path.basename(media.file_url.split('?')[0]);
+    } else if (id.startsWith('media-') || id.includes('.')) {
+      localFilename = path.basename(id.split('?')[0]);
+    } else if (media?.file_url) {
+      localFilename = path.basename(media.file_url.split('?')[0]);
+    }
+
+    if (localFilename) {
+      const localPath = path.join(uploadsDir, localFilename);
+      if (fs.existsSync(localPath)) {
+        const stat = fs.statSync(localPath);
+        const fileSize = stat.size;
+        const ext = path.extname(localFilename).toLowerCase();
+        const contentType =
+          ext === '.mp4'
+            ? 'video/mp4'
+            : ext === '.webm'
+            ? 'video/webm'
+            : ext === '.mov'
+            ? 'video/quicktime'
+            : ext === '.png'
+            ? 'image/png'
+            : ext === '.webp'
+            ? 'image/webp'
+            : 'image/jpeg';
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+
+        if (rangeHeader) {
+          const parts = rangeHeader.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const chunkSize = end - start + 1;
+          const stream = fs.createReadStream(localPath, { start, end });
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Content-Length': chunkSize,
+            'Content-Type': contentType,
+          });
+          return stream.pipe(res);
+        } else {
+          res.writeHead(200, {
+            'Content-Length': fileSize,
+            'Content-Type': contentType,
+          });
+          return fs.createReadStream(localPath).pipe(res);
+        }
+      }
+    }
+
+    // 2. Try Cloudflare R2 object
+    const targetKey = media?.file_url || id;
+    const r2Obj = await getObjectFromR2(targetKey, rangeHeader ? String(rangeHeader) : undefined);
+    if (r2Obj && r2Obj.body) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Accept-Ranges', 'bytes');
+      if (r2Obj.contentType) res.setHeader('Content-Type', r2Obj.contentType);
+      if (r2Obj.contentLength) res.setHeader('Content-Length', r2Obj.contentLength);
+      if (r2Obj.contentRange) res.setHeader('Content-Range', r2Obj.contentRange);
+      res.status(r2Obj.status);
+
+      if (typeof (r2Obj.body as any).pipe === 'function') {
+        return (r2Obj.body as any).pipe(res);
+      } else {
+        const { Readable } = await import('stream');
+        const nodeStream = Readable.fromWeb(r2Obj.body as any);
+        return nodeStream.pipe(res);
+      }
+    }
+
+    // 3. Fallback to Firestore binary chunk
+    const chunkBuffer = await loadMediaBinaryFromFirestore(localFilename || id);
+    if (chunkBuffer && chunkBuffer.length > 0) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Content-Type', media?.mime_type || (media?.type === 'video' ? 'video/mp4' : 'image/jpeg'));
+      return res.send(chunkBuffer);
+    }
+
+    // 4. Redirect to public URL if available
+    if (media?.file_url && media.file_url.startsWith('http')) {
+      return res.redirect(media.file_url);
+    }
+
+    return res.status(404).send('Mídia não encontrada para streaming.');
+  } catch (err: any) {
+    console.error('Error streaming media:', err);
+    return res.status(500).send('Erro ao transmitir mídia.');
   }
 });
 
