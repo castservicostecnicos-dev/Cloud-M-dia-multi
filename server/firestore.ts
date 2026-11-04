@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  deleteDoc,
   setLogLevel as setFirestoreLogLevel,
   Firestore,
 } from 'firebase/firestore/lite';
@@ -343,4 +344,41 @@ export async function loadMediaBinaryFromFirestore(filename: string): Promise<Bu
     return null;
   }
 }
+
+/**
+ * Permanently delete media binary and metadata from Firestore cloud chunks
+ */
+export async function deleteMediaBinaryFromFirestore(keyOrId: string): Promise<boolean> {
+  const db = getFirestoreDb();
+  if (!db || !keyOrId) return false;
+
+  try {
+    const key = sanitizeDocKey(keyOrId.replace(/^idb:/, '').replace(/^\/uploads\//, ''));
+    if (!key) return false;
+
+    const metaRef = doc(db, 'app_data', `mmeta_${key}`);
+    const metaSnap = await getDoc(metaRef);
+    let totalChunks = 20;
+
+    if (metaSnap.exists()) {
+      try {
+        const meta = JSON.parse(metaSnap.data()?.data || '{}');
+        if (meta.totalChunks) totalChunks = Number(meta.totalChunks);
+      } catch {}
+      await deleteDoc(metaRef);
+    }
+
+    for (let i = 0; i < totalChunks; i++) {
+      try {
+        await deleteDoc(doc(db, 'app_data', `mbin_${key}_${i}`));
+      } catch {}
+    }
+
+    return true;
+  } catch (err: any) {
+    console.warn('[Firebase Firestore] Failed to delete media binary from cloud:', err?.message || err);
+    return false;
+  }
+}
+
 

@@ -172,10 +172,27 @@ export async function uploadToR2(params: {
   };
 }
 
-export async function deleteFromR2(key: string): Promise<boolean> {
+export async function deleteFromR2(keyOrUrl: string): Promise<boolean> {
   try {
     const config = getEffectiveR2Config();
     if (!isR2Configured(config)) return false;
+    if (!keyOrUrl) return false;
+
+    let key = keyOrUrl.trim();
+    if (key.includes('://')) {
+      try {
+        const parsed = new URL(key);
+        key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+      } catch {
+        key = key.split('/').pop() || key;
+      }
+    } else {
+      key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
+    }
+
+    if (!key || key.startsWith('widget:') || key.startsWith('data:') || key.startsWith('idb:')) {
+      return false;
+    }
 
     const client = createR2Client(config);
     const command = new DeleteObjectCommand({
@@ -183,9 +200,11 @@ export async function deleteFromR2(key: string): Promise<boolean> {
       Key: key,
     });
     await client.send(command);
+    console.log('[Cloudflare R2] Objeto excluído com sucesso do bucket:', key);
     return true;
-  } catch (err) {
-    console.warn('[Cloudflare R2] Falha ao deletar objeto:', key, err);
+  } catch (err: any) {
+    console.warn('[Cloudflare R2] Falha ao deletar objeto:', keyOrUrl, err?.message || err);
     return false;
   }
 }
+

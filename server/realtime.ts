@@ -166,6 +166,28 @@ class RealtimeHub {
     }
   }
 
+  public broadcastMediaChange(companyId: string, action: 'created' | 'deleted' | 'updated', mediaOrId?: any) {
+    const payload = JSON.stringify({
+      type: 'MEDIA_CHANGED',
+      action,
+      companyId,
+      media: typeof mediaOrId === 'object' ? mediaOrId : undefined,
+      mediaId: typeof mediaOrId === 'string' ? mediaOrId : mediaOrId?.id,
+      timestamp: Date.now(),
+    });
+    const message = `data: ${payload}\n\n`;
+
+    for (const client of this.clients) {
+      if (!client.companyId || client.companyId === companyId) {
+        try {
+          client.res.write(message);
+        } catch {
+          // Handled on close
+        }
+      }
+    }
+  }
+
   public recordHeartbeat(playerIdOrCode: string) {
     const data = db.getData();
     const target = String(playerIdOrCode || '').trim().toLowerCase();

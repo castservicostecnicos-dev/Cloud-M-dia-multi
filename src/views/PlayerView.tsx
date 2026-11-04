@@ -584,7 +584,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
               triggerCallOnScreen(callData);
             }
           }
-        } else if (payload.type === 'RELOAD_PLAYLIST' || payload.type === 'RESTART_PLAYER') {
+        } else if (payload.type === 'RELOAD_PLAYLIST' || payload.type === 'RESTART_PLAYER' || payload.type === 'MEDIA_CHANGED') {
           const matchesPlayer =
             !payload.playerId ||
             !playerId ||
@@ -597,7 +597,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
           const matchesCompany =
             payload.companyId && companyId && payload.companyId === companyId;
 
-          if (matchesPlayer || matchesPlaylist || matchesCompany) {
+          if (matchesPlayer || matchesPlaylist || matchesCompany || payload.type === 'MEDIA_CHANGED') {
             handleRestartCommand(payload);
           }
         }
@@ -662,12 +662,12 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
               } catch {}
               triggerCallOnScreen(call);
             }
-          } else if (evt.data?.type === 'RELOAD_PLAYLIST' || evt.data?.type === 'RESTART_PLAYER') {
+          } else if (evt.data?.type === 'RELOAD_PLAYLIST' || evt.data?.type === 'RESTART_PLAYER' || evt.data?.type === 'MEDIA_CHANGED') {
             const matches =
               !targetPlayerId ||
               !evt.data.playerId ||
               evt.data.playerId === targetPlayerId;
-            if (matches) {
+            if (matches || evt.data?.type === 'MEDIA_CHANGED') {
               handleRestartCommand(evt.data);
             }
           }

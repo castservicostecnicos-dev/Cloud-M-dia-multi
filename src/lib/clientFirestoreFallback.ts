@@ -897,10 +897,80 @@ export async function handleClientFallbackRequest(
 
   if (pathOnly.startsWith('/company/media/') && method === 'DELETE') {
     const medId = pathOnly.split('/')[3];
+    const targetMedia = (dbData.media || []).find((m: any) => m.id === medId);
+
     deleteIndexedDbMedia(medId);
+    if (targetMedia?.file_url) {
+      deleteIndexedDbMedia(targetMedia.file_url);
+    }
+
     dbData.media = (dbData.media || []).filter((m: any) => m.id !== medId);
+
+    // Remove from all playlists
+    if (dbData.playlists) {
+      for (const pl of dbData.playlists) {
+        if (pl.items) {
+          pl.items = pl.items.filter((item: any) => item.media_id !== medId);
+        }
+      }
+    }
+
+    // Register tombstone in deleted_media_ids
+    dbData.deleted_media_ids = dbData.deleted_media_ids || [];
+    if (!dbData.deleted_media_ids.includes(medId)) {
+      dbData.deleted_media_ids.push(medId);
+    }
+    if (targetMedia?.name) {
+      dbData.deleted_media_ids.push(targetMedia.name.toLowerCase());
+    }
+    if (targetMedia?.file_url) {
+      dbData.deleted_media_ids.push(targetMedia.file_url);
+    }
+    if (targetMedia?.drive_file_id) {
+      dbData.deleted_media_ids.push(targetMedia.drive_file_id);
+    }
+
+    // Delete from Cloudflare R2 if configured
+    const r2 = dbData.r2_settings;
+    if (r2?.account_id && r2?.access_key_id && r2?.secret_access_key && r2?.bucket_name) {
+      try {
+        const cleanAccountId = String(r2.account_id).trim().replace(/^https?:\/\//i, '').replace(/\.r2\.cloudflarestorage\.com.*$/i, '');
+        const cleanBucket = String(r2.bucket_name).trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+        const { S3Client, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3 = new S3Client({
+          region: 'auto',
+          endpoint: `https://${cleanAccountId}.r2.cloudflarestorage.com`,
+          credentials: {
+            accessKeyId: String(r2.access_key_id).trim(),
+            secretAccessKey: String(r2.secret_access_key).trim(),
+          },
+        });
+
+        const urlsToDelete = [targetMedia?.file_url, targetMedia?.local_url].filter(Boolean);
+        for (const u of urlsToDelete) {
+          let key = String(u).trim();
+          if (key.includes('://')) {
+            try {
+              const p = new URL(key);
+              key = decodeURIComponent(p.pathname.replace(/^\/+/, ''));
+            } catch {
+              key = key.split('/').pop() || key;
+            }
+          } else {
+            key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
+          }
+          if (key && !key.startsWith('widget:') && !key.startsWith('data:') && !key.startsWith('idb:')) {
+            await s3.send(new DeleteObjectCommand({ Bucket: cleanBucket, Key: key })).catch(() => {});
+            console.log('[Client Fallback] Objeto excluído do Cloudflare R2:', key);
+          }
+        }
+      } catch (r2DelErr) {
+        console.warn('[Client Fallback] Falha ao excluir do Cloudflare R2:', r2DelErr);
+      }
+    }
+
     await saveCloudDb(dbData);
-    return { message: 'Mídia excluída com sucesso.' };
+    return { message: 'Mídia excluída com sucesso do app e da nuvem Cloudflare R2.' };
   }
 
   if (pathOnly === '/company/playlists' && method === 'POST') {
@@ -1676,8 +1746,10 @@ export async function handleClientFallbackRequest(
             })
           );
 
-          if (r2.public_url && r2.public_url.trim()) {
-            r2PublicUrl = `${r2.public_url.trim().replace(/\/+$/, '')}/${r2Key}`;
+          const publicDom = (r2.public_domain || r2.public_url || '').trim();
+          if (publicDom) {
+            const norm = publicDom.startsWith('http') ? publicDom : `https://${publicDom}`;
+            r2PublicUrl = `${norm.replace(/\/+$/, '')}/${r2Key}`;
           } else {
             r2PublicUrl = `https://${cleanBucket}.${cleanAccountId}.r2.cloudflarestorage.com/${r2Key}`;
           }

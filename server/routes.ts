@@ -20,6 +20,7 @@ import {
   PlayerCall,
   seedDefaultRssFeedsForCompany,
   ensureCompanyDefaultMedia,
+  isMediaOrUrlDeleted,
   DEFAULT_RSS_FEEDS,
   DEFAULT_PLANS,
   uploadsDir,
@@ -28,7 +29,7 @@ import {
 } from './db.js';
 import { realtimeHub } from './realtime.js';
 import { runMediaIntegrityAudit, MediaIntegrityAuditReport } from './mediaIntegrity.js';
-import { saveMediaBinaryToFirestore } from './firestore.js';
+import { saveMediaBinaryToFirestore, deleteMediaBinaryFromFirestore } from './firestore.js';
 import {
   uploadToR2,
   getEffectiveR2Config,
@@ -2409,19 +2410,30 @@ apiRouter.post('/upload', requireAuth, async (req: AuthenticatedRequest, res) =>
 });
 
 // Media Management
-apiRouter.get('/company/media', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.get('/company/media', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
-  const injected = ensureCompanyDefaultMedia(companyId, data);
-  if (injected) {
-    db.persist();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
+    : req.user!.company_id!;
+
+  if (companyId) {
+    const injected = ensureCompanyDefaultMedia(companyId, data);
+    if (injected) {
+      db.persist();
+    }
   }
-  const media = data.media.filter((m) => m.company_id === companyId);
+
+  const media = companyId
+    ? data.media.filter((m) => m.company_id === companyId)
+    : (req.user!.role === 'admin' ? data.media : []);
   res.json(media);
 });
 
-apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+  const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? (req.body.company_id || (req.query.company_id as string) || (data.companies[0]?.id) || '')
+    : req.user!.company_id!;
   const {
     name,
     type,
@@ -2444,7 +2456,6 @@ apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: Auth
     return res.status(400).json({ error: 'Nome e arquivo de mídia são obrigatórios.' });
   }
 
-  const data = db.getData();
   const company = data.companies.find((c) => c.id === companyId);
   const plan = data.plans.find((p) => p.id === company?.plan_id);
 
@@ -2528,6 +2539,16 @@ apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: Auth
 
   db.persist();
 
+  try {
+    realtimeHub.broadcastMediaChange(newMedia.company_id, 'created', newMedia);
+    realtimeHub.sendRestartCommand({
+      companyId: newMedia.company_id,
+      reason: `Nova mídia "${newMedia.name}" adicionada`,
+    });
+  } catch (e) {
+    console.warn('Falha ao disparar broadcast de nova mídia:', e);
+  }
+
   res.status(201).json({
     ...newMedia,
     addToAllPlaylists: Boolean(req.body.addToAllPlaylists),
@@ -2535,11 +2556,11 @@ apiRouter.post('/company/media', requireAuth, requireRole('company'), (req: Auth
   });
 });
 
-apiRouter.put('/company/media/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.put('/company/media/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const data = db.getData();
-  const media = data.media.find((m) => m.id === id && m.company_id === companyId);
+  const media = data.media.find((m) => m.id === id && (user.role === 'admin' || m.company_id === user.company_id));
   if (!media) {
     return res.status(404).json({ error: 'Mídia não encontrada.' });
   }
@@ -2579,23 +2600,95 @@ apiRouter.put('/company/media/:id', requireAuth, requireRole('company'), (req: A
   res.json(media);
 });
 
-apiRouter.delete('/company/media/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
+  const user = req.user!;
   const data = db.getData();
-  const idx = data.media.findIndex((m) => m.id === id && m.company_id === companyId);
+  const idx = data.media.findIndex((m) => m.id === id && (user.role === 'admin' || m.company_id === user.company_id));
   if (idx === -1) {
     return res.status(404).json({ error: 'Mídia não encontrada.' });
   }
 
+  const targetMedia = data.media[idx];
+  const companyId = targetMedia.company_id;
+
+  // 1. Remove from in-memory media array
   data.media.splice(idx, 1);
-  // Remove from any playlists
+
+  // 2. Remove references from all playlists
   for (const pl of data.playlists) {
-    pl.items = pl.items.filter((item) => item.media_id !== id);
+    if (pl.items) {
+      pl.items = pl.items.filter((item) => item.media_id !== id);
+    }
   }
+
+  // 3. Register tombstone in deleted_media_ids so default seeder and drive scanners never resurrect it
+  data.deleted_media_ids = data.deleted_media_ids || [];
+  if (!data.deleted_media_ids.includes(id)) {
+    data.deleted_media_ids.push(id);
+  }
+  if (targetMedia.name) {
+    data.deleted_media_ids.push(targetMedia.name.toLowerCase());
+  }
+  if (targetMedia.file_url) {
+    data.deleted_media_ids.push(targetMedia.file_url);
+  }
+  if (targetMedia.drive_file_id) {
+    data.deleted_media_ids.push(targetMedia.drive_file_id);
+    if (data.drive_documents) {
+      data.drive_documents = data.drive_documents.filter((d) => d.drive_file_id !== targetMedia.drive_file_id);
+    }
+  }
+
+  // 4. Delete object from Cloudflare R2 bucket
+  if (targetMedia.file_url) {
+    deleteFromR2(targetMedia.file_url).catch((err) =>
+      console.warn('[Cloudflare R2] Falha ao excluir mídia do bucket:', err?.message || err)
+    );
+  }
+  if (targetMedia.local_url && targetMedia.local_url !== targetMedia.file_url) {
+    deleteFromR2(targetMedia.local_url).catch(() => {});
+  }
+
+  // 5. Delete binary from Firestore cloud chunks (both by media.id and by file basename)
+  deleteMediaBinaryFromFirestore(targetMedia.id).catch(() => {});
+  if (targetMedia.file_url) {
+    const fname = path.basename(targetMedia.file_url.split('?')[0]);
+    if (fname && fname !== targetMedia.id) {
+      deleteMediaBinaryFromFirestore(fname).catch(() => {});
+    }
+  }
+
+  // 6. Delete file from local disk if present in uploads directory
+  if (targetMedia.file_url && targetMedia.file_url.includes('/uploads/')) {
+    const filename = path.basename(targetMedia.file_url.split('?')[0]);
+    const filePath = path.join(uploadsDir, filename);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log('[Uploads] Arquivo local excluído do disco:', filePath);
+      } catch (err) {
+        console.warn('[Uploads] Falha ao excluir arquivo local:', filePath, err);
+      }
+    }
+  }
+
+  // 7. Persist changes to disk and cloud
   db.persist();
 
-  res.json({ message: 'Mídia excluída com sucesso.' });
+  // 8. Inform active players and dashboards to update immediately
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'deleted', id);
+    realtimeHub.sendRestartCommand({
+      companyId,
+      reason: `Mídia "${targetMedia.name}" excluída`,
+    });
+  } catch {}
+
+  res.json({
+    message: `Mídia "${targetMedia.name}" excluída com sucesso do sistema e do Cloudflare R2.`,
+    deletedId: id,
+  });
 });
 
 // Adicionar uma mídia existente a TODAS as playlists da empresa de uma só vez
@@ -2668,13 +2761,16 @@ apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRo
 // Cache for recent integrity check reports
 const integrityReportsCache: Map<string, MediaIntegrityAuditReport> = new Map();
 
-// Verify media integrity against Google Drive and database for Company
-apiRouter.post('/company/media/check-integrity', requireAuth, requireRole('company'), async (req: AuthenticatedRequest, res) => {
+// Verify media integrity against Google Drive, Cloudflare R2, and database for Company
+apiRouter.post('/company/media/check-integrity', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   try {
-    const companyId = req.user!.company_id!;
+    const user = req.user!;
+    const data = db.getData();
+    const companyId = user.role === 'admin'
+      ? (req.body?.companyId || (req.query.company_id as string) || (data.companies[0]?.id) || '')
+      : user.company_id!;
     const driveAccessToken = (req.body?.driveAccessToken || req.headers['x-drive-access-token']) as string | undefined;
 
-    const data = db.getData();
     const companyMedia = data.media.filter((m) => m.company_id === companyId);
     const companyPlaylists = data.playlists.filter((p) => p.company_id === companyId);
     const companyPlayers = data.players.filter((p) => p.company_id === companyId);
@@ -2695,8 +2791,12 @@ apiRouter.post('/company/media/check-integrity', requireAuth, requireRole('compa
   }
 });
 
-apiRouter.get('/company/media/integrity-status', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.get('/company/media/integrity-status', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+  const user = req.user!;
+  const data = db.getData();
+  const companyId = user.role === 'admin'
+    ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
+    : user.company_id!;
   const report = integrityReportsCache.get(`company_${companyId}`);
   if (report) {
     return res.json(report);
@@ -5227,6 +5327,9 @@ apiRouter.post('/drive/scan-and-import', requireAuth, async (req: AuthenticatedR
       for (const folder of foldersToScan) {
         const files = await listFilesInFolder(folder.id);
         for (const file of files) {
+          if (isMediaOrUrlDeleted(data, file.id) || isMediaOrUrlDeleted(data, file.name)) {
+            continue;
+          }
           const alreadyInMedia = data.media.some((m) => m.drive_file_id === file.id);
           const alreadyInDocs = data.drive_documents?.some((d) => d.drive_file_id === file.id);
 
@@ -5321,7 +5424,11 @@ apiRouter.post('/drive/scan-and-import', requireAuth, async (req: AuthenticatedR
 // Server-side upload endpoint for Company media to the pre-registered Google Drive account
 apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   try {
-    const companyId = req.body.companyId || req.user!.company_id!;
+    const data = db.getData();
+    let companyId = req.body.companyId || req.user!.company_id;
+    if (!companyId && req.user!.role === 'admin') {
+      companyId = (req.query.company_id as string) || (req.headers['x-company-id'] as string) || data.companies[0]?.id || '';
+    }
     const {
       fileData,
       uploadedFilename,
@@ -5336,7 +5443,6 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
     }
 
-    const data = db.getData();
     const company = data.companies.find((c) => c.id === companyId);
     if (!company) {
       return res.status(404).json({ error: 'Empresa não encontrada.' });
@@ -5572,6 +5678,17 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
     }
 
     db.persist();
+
+    // Broadcast to all connected devices (TV players and dashboards) in real-time
+    try {
+      realtimeHub.broadcastMediaChange(companyId, 'created', newMedia);
+      realtimeHub.sendRestartCommand({
+        companyId,
+        reason: `Nova mídia "${newMedia.name}" carregada no sistema`,
+      });
+    } catch (e) {
+      console.warn('Falha ao disparar broadcast de mídia carregada:', e);
+    }
 
     res.json({
       status: 'ok',

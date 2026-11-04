@@ -54,6 +54,7 @@ service cloud.firestore {
     match /app_data/{docId} {
       allow get, list: if isValidId(docId);
       allow create, update: if isValidId(docId) && isValidAppData(request.resource.data);
+      allow delete: if isValidId(docId);
     }
 
     match /system_meta/{metaId} {

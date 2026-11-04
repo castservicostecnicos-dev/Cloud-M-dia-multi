@@ -950,13 +950,54 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     };
     window.addEventListener('focus', handleWindowFocus);
 
-    // Refresh stats and player status periodically every 5 seconds for automatic live monitoring
+    // 1. Live SSE Connection for instant multi-device synchronization
+    const targetCompId = companyInfo?.id || (stats?.company as any)?.id;
+    let eventSource: EventSource | null = null;
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('indoor_auth_token') : null;
+      const params = new URLSearchParams();
+      if (token) params.append('token', token);
+      if (targetCompId) params.append('companyId', targetCompId);
+      eventSource = new EventSource(`/api/realtime/stream?${params.toString()}`);
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'MEDIA_CHANGED' || payload.type === 'RELOAD_PLAYLIST') {
+            loadData();
+          }
+        } catch {}
+      };
+    } catch {}
+
+    // 2. BroadcastChannel & Storage Event Sync for same-device multi-tab/window sync
+    let bc: BroadcastChannel | null = null;
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        bc = new BroadcastChannel('indoor_media_calls');
+        bc.onmessage = (ev) => {
+          if (ev.data?.type === 'MEDIA_CHANGED' || ev.data?.type === 'RELOAD_PLAYLIST' || ev.data?.type === 'RELOAD_MEDIA') {
+            loadData();
+          }
+        };
+      } catch {}
+    }
+
+    const handleStorage = (ev: StorageEvent) => {
+      if (ev.key === 'indoor_media_updated_at' || ev.key === 'indoor_player_restart_cmd') {
+        loadData();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    // 3. Fast multi-device polling every 4 seconds (guarantees sync across different devices/browsers)
     const interval = setInterval(() => {
       Promise.all([
-        api.getCompanyPlayers(),
+        api.getCompanyPlayers().catch(() => []),
         api.getCompanyStats().catch(() => null),
+        api.getCompanyMedia().catch(() => []),
+        api.getCompanyPlaylists().catch(() => []),
       ])
-        .then(([pl, st]) => {
+        .then(([pl, st, md, py]) => {
           if (Array.isArray(pl)) {
             setPlayers(pl);
             setDiagnosticModalPlayer((current) => {
@@ -966,15 +1007,28 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             });
           }
           if (st) setStats(st);
+          if (Array.isArray(md)) {
+            setMediaList((prev) => {
+              // Only update state if length or IDs changed to avoid unnecessary re-renders
+              if (prev.length !== md.length || prev.some((item, idx) => md[idx]?.id !== item.id)) {
+                return md;
+              }
+              return prev;
+            });
+          }
+          if (Array.isArray(py)) setPlaylists(py);
         })
         .catch(() => {});
-    }, 5000);
+    }, 4000);
 
     return () => {
       window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('storage', handleStorage);
+      if (eventSource) eventSource.close();
+      if (bc) bc.close();
       clearInterval(interval);
     };
-  }, []);
+  }, [companyInfo?.id]);
 
   // --- STORE / LOJAS DA REDE HANDLERS ---
   const handleOpenStoreModal = (store?: CompanyStore) => {
@@ -1777,10 +1831,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           setUploadProgressStatus(`Enviando ${i + 1} de ${totalFiles}: ${fileTitle}...`);
 
           try {
+            const currentCompanyId = companyInfo?.id || (stats?.company as any)?.id || undefined;
             const uploadRes = await api.uploadCompanyMediaFileChunked({
               file: fileItem.file,
               name: fileTitle,
               duration: Number(fileItem.duration) || (fileItem.isVideo ? 15 : 10),
+              companyId: currentCompanyId,
               addToAllPlaylists: false,
               clientDriveToken: currentToken,
               onProgress: (pct) => {
@@ -1820,8 +1876,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           targetFileUrl = resolveMediaDisplayUrl(targetFileUrl);
         }
 
+        const currentCompanyId = companyInfo?.id || (stats?.company as any)?.id || undefined;
         const singleTitle = mediaForm.name.trim() || (mediaSourceType === 'rss' ? 'Notícias RSS' : 'Nova Mídia');
         const created = await api.uploadCompanyMedia({
+          company_id: currentCompanyId,
           name: singleTitle,
           type: mediaSourceType === 'weather_clock' ? 'weather_clock' : mediaSourceType === 'rss' ? 'rss' : mediaForm.type,
           file_url: targetFileUrl,
@@ -1924,6 +1982,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setMediaModalOpen(false);
       resetMediaModalState(playlistModalOpen && editingPlaylist ? editingPlaylist.id : undefined);
       loadData();
+
+      // Broadcast to other tabs & windows
+      try {
+        if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+          const bc = new BroadcastChannel('indoor_media_calls');
+          bc.postMessage({ type: 'MEDIA_CHANGED', action: 'created', timestamp: Date.now() });
+        }
+        localStorage.setItem('indoor_media_updated_at', String(Date.now()));
+      } catch {}
     } catch (err: any) {
       showToast('error', err.message || 'Erro ao cadastrar mídia.');
     } finally {
@@ -1943,6 +2010,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           showToast('success', res.message);
           setConfirmData((p) => ({ ...p, isOpen: false }));
           loadData();
+
+          // Broadcast deletion to other tabs & windows
+          try {
+            if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+              const bc = new BroadcastChannel('indoor_media_calls');
+              bc.postMessage({ type: 'MEDIA_CHANGED', action: 'deleted', mediaId: media.id, timestamp: Date.now() });
+            }
+            localStorage.setItem('indoor_media_updated_at', String(Date.now()));
+          } catch {}
         } catch (err: any) {
           showToast('error', err.message);
         }

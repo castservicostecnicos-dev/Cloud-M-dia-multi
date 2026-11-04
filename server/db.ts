@@ -236,20 +236,42 @@ export const DEFAULT_RSS_FEEDS: RssPreset[] = [
   },
 ];
 
+export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier: string | undefined): boolean {
+  if (!identifier || !data.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
+  const clean = identifier.trim().toLowerCase();
+  return data.deleted_media_ids.some((d) => d.trim().toLowerCase() === clean);
+}
+
 export function ensureCompanyDefaultMedia(
   companyId: string,
   data: DatabaseSchema,
   now: string = new Date().toISOString()
 ): boolean {
+  if (!companyId) return false;
+  data.seeded_companies = data.seeded_companies || [];
+  data.deleted_media_ids = data.deleted_media_ids || [];
+
+  // If this company has already undergone initial seeding, NEVER resurrect deleted media!
+  if (data.seeded_companies.includes(companyId)) {
+    return false;
+  }
+
+  // Mark company as seeded so defaults are only injected once on creation
+  data.seeded_companies.push(companyId);
   let changed = false;
 
   // 1. Ensure RSS feeds exist
   seedDefaultRssFeedsForCompany(companyId, data, now);
 
-  // 2. Ensure Weather & Clock media exists for this company
+  // 2. Ensure Weather & Clock media exists for this company if not explicitly deleted
+  const weatherId = `med-${companyId}-weather`;
+  const isWeatherDeleted =
+    isMediaOrUrlDeleted(data, weatherId) ||
+    isMediaOrUrlDeleted(data, 'Hora Certa & Previsão do Tempo') ||
+    isMediaOrUrlDeleted(data, 'widget:weather_clock');
+
   const hasWeather = data.media.some((m) => m.company_id === companyId && m.type === 'weather_clock');
-  if (!hasWeather) {
-    const weatherId = `med-${companyId}-weather`;
+  if (!hasWeather && !isWeatherDeleted) {
     data.media.push({
       id: weatherId,
       company_id: companyId,
@@ -264,7 +286,7 @@ export function ensureCompanyDefaultMedia(
     changed = true;
   }
 
-  // 3. Ensure full-screen RSS Media items exist for common news channels
+  // 3. Ensure full-screen RSS Media items exist for common news channels if not deleted
   const rssPresets = [
     { name: 'Notícias RSS - Saúde & Bem-Estar', url: 'https://g1.globo.com/rss/g1/saude/', duration: 15 },
     { name: 'Notícias RSS - G1 Brasil', url: 'https://g1.globo.com/rss/g1/brasil/', duration: 15 },
@@ -273,6 +295,9 @@ export function ensureCompanyDefaultMedia(
   ];
 
   for (const preset of rssPresets) {
+    if (isMediaOrUrlDeleted(data, preset.url) || isMediaOrUrlDeleted(data, preset.name)) {
+      continue;
+    }
     const exists = data.media.some(
       (m) =>
         m.company_id === companyId &&
@@ -303,7 +328,12 @@ export function seedDefaultRssFeedsForCompany(
   data: DatabaseSchema,
   now: string = new Date().toISOString()
 ): void {
+  data.deleted_media_ids = data.deleted_media_ids || [];
+
   DEFAULT_RSS_FEEDS.forEach((feed, idx) => {
+    if (isMediaOrUrlDeleted(data, feed.url) || isMediaOrUrlDeleted(data, feed.name)) {
+      return;
+    }
     const alreadyExists = data.rss_feeds.some(
       (r) =>
         r.company_id === companyId &&
@@ -322,16 +352,22 @@ export function seedDefaultRssFeedsForCompany(
     }
   });
 
-  // Ensure default Full-Screen RSS Media item exists
+  // Ensure default Full-Screen RSS Media item exists only if not deleted
+  const defaultRssUrl = 'https://g1.globo.com/rss/g1/saude/';
+  const defaultRssName = 'Notícias RSS - Saúde & Bem-Estar';
+  if (isMediaOrUrlDeleted(data, defaultRssUrl) || isMediaOrUrlDeleted(data, defaultRssName)) {
+    return;
+  }
+
   const hasRssMedia = data.media.some((m) => m.company_id === companyId && m.type === 'rss');
   if (!hasRssMedia) {
     const rssMediaId = `med-${Date.now()}-rss-saude`;
     data.media.push({
       id: rssMediaId,
       company_id: companyId,
-      name: 'Notícias RSS - Saúde & Bem-Estar',
+      name: defaultRssName,
       type: 'rss',
-      file_url: 'https://g1.globo.com/rss/g1/saude/',
+      file_url: defaultRssUrl,
       duration: 15,
       active: true,
       created_at: now,
@@ -461,6 +497,8 @@ export interface DatabaseSchema {
   r2_settings?: R2Settings;
   proof_of_play_logs?: ProofOfPlayLog[];
   sessions?: AuthSession[];
+  deleted_media_ids?: string[];
+  seeded_companies?: string[];
 }
 
 export interface AuthSession {
@@ -737,6 +775,15 @@ class DatabaseStore {
               changed = true;
             }
           }
+        }
+
+        if (!this.data.deleted_media_ids) {
+          this.data.deleted_media_ids = [];
+          changed = true;
+        }
+        if (!this.data.seeded_companies) {
+          this.data.seeded_companies = (this.data.companies || []).map((c) => c.id);
+          changed = true;
         }
 
         if (changed) {
