@@ -69,6 +69,7 @@ import { PlayerDiagnosticView, DiagnosticPlayerData } from '../components/Player
 import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
 import { resolveMediaDisplayUrl, getCachedToken, setCachedAccessToken, initAuth, googleSignIn, setManualDriveToken, isRealOAuthToken } from '../lib/googleDrive';
 import { registerBackHandler } from '../lib/backNavigation';
+import { saveIndexedDbMedia, deleteIndexedDbMedia } from '../lib/indexedDbMedia';
 
 interface CompanyDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -1841,6 +1842,16 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
             if (uploadRes?.media) {
               createdMedias.push(uploadRes.media);
+              if (fileItem.file) {
+                const fr = new FileReader();
+                fr.onload = () => {
+                  const dUrl = fr.result as string;
+                  if (dUrl && uploadRes.media?.id) {
+                    saveIndexedDbMedia(uploadRes.media.id, dUrl, uploadRes.media.local_url).catch(() => {});
+                  }
+                };
+                fr.readAsDataURL(fileItem.file);
+              }
             }
           } catch (fileErr: any) {
             console.error('Falha ao enviar arquivo:', fileItem.name, fileErr);
@@ -1995,9 +2006,39 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     setConfirmData({
       isOpen: true,
       title: 'Excluir Mídia',
-      message: `Tem certeza que deseja excluir a mídia "${media.name}"?`,
+      message: `Tem certeza que deseja excluir a mídia "${media.name}"? Ela será removida da nuvem, do aplicativo e de todas as playlists permanentemente.`,
       action: async () => {
         try {
+          // Immediately purge from client state so UI never reflects the deleted media
+          setMediaList((prev) => prev.filter((m) => m.id !== media.id));
+          setPlaylists((prev) =>
+            prev.map((pl) => ({
+              ...pl,
+              items: (pl.items || []).filter((it) => it.media_id !== media.id),
+            }))
+          );
+          setIntegrityReport((prev) => {
+            if (!prev) return null;
+            const filteredIssues = (prev.issues || []).filter((iss) => iss.media_id !== media.id);
+            const filteredItems = (prev.items || []).filter((it) => it.media_id !== media.id);
+            return {
+              ...prev,
+              has_issues: filteredIssues.length > 0,
+              issues: filteredIssues,
+              items: filteredItems,
+              summary: {
+                total: filteredItems.length,
+                with_issues: filteredIssues.length,
+                healthy: filteredItems.filter((it) => it.healthy).length,
+              },
+            };
+          });
+
+          // Delete from browser local IndexedDB cache
+          deleteIndexedDbMedia(media.id).catch(() => {});
+          if (media.file_url) deleteIndexedDbMedia(media.file_url).catch(() => {});
+          if ((media as any).local_url) deleteIndexedDbMedia((media as any).local_url).catch(() => {});
+
           const res = await api.deleteCompanyMedia(media.id);
           showToast('success', res.message);
           setConfirmData((p) => ({ ...p, isOpen: false }));

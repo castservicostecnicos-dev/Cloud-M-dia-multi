@@ -1016,23 +1016,30 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
               <video
                 ref={videoRef}
                 key={currentMedia.id + currentIndex}
-                src={resolveMediaUrl(currentMedia.file_url)}
+                src={
+                  ((currentMedia as any)?.local_url && (currentMedia as any).local_url.startsWith('/uploads/'))
+                    ? (currentMedia as any).local_url
+                    : (currentMedia.media_id || currentMedia.id)
+                    ? `/api/media/stream/${currentMedia.media_id || currentMedia.id}`
+                    : resolveMediaUrl(currentMedia.file_url)
+                }
                 autoPlay
                 playsInline
                 onEnded={handleVideoEnded}
                 onError={(e) => {
                   const target = e.currentTarget;
-                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
-                  if (driveId && !(target.src || '').includes('uc?export=download')) {
-                    target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                  const streamUrl = `/api/media/stream/${currentMedia.media_id || currentMedia.id}`;
+                  if (target.src && !target.src.includes('/api/media/stream/')) {
+                    target.src = streamUrl;
                     return;
                   }
                   if ((currentMedia as any)?.local_url && target.src !== (currentMedia as any).local_url) {
                     target.src = (currentMedia as any).local_url;
                     return;
                   }
-                  if (currentMedia?.id && !(target.src || '').includes('/api/media/stream/')) {
-                    target.src = `/api/media/stream/${currentMedia.id}`;
+                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
+                  if (driveId && !(target.src || '').includes('uc?export=download')) {
+                    target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
                     return;
                   }
                   getIndexedDbMedia(currentMedia).then((rec) => {

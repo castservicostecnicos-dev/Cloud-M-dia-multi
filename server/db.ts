@@ -874,6 +874,64 @@ class DatabaseStore {
           if (s && s.token) sessionMap.set(s.token, s);
         }
 
+        // Merge tombstones (deleted media IDs, URLs, and filenames)
+        const combinedDeletedIds = Array.from(
+          new Set([...(cloudData.deleted_media_ids || []), ...(localData.deleted_media_ids || [])])
+        );
+
+        // Helper to check if any media or item was deleted
+        const isDeletedItem = (item: any) => {
+          if (!item) return true;
+          const id = String(item.id || '').toLowerCase();
+          const fileUrl = String(item.file_url || '').toLowerCase();
+          const localUrl = String(item.local_url || '').toLowerCase();
+          const name = String(item.name || '').toLowerCase();
+          const driveId = String(item.drive_file_id || '').toLowerCase();
+          const uniqueCode = String(item.unique_code || '').toLowerCase();
+
+          return combinedDeletedIds.some((d) => {
+            const cd = String(d || '').trim().toLowerCase();
+            if (!cd) return false;
+            return (
+              cd === id ||
+              (fileUrl && cd === fileUrl) ||
+              (localUrl && cd === localUrl) ||
+              (name && cd === name) ||
+              (driveId && cd === driveId) ||
+              (uniqueCode && cd === uniqueCode) ||
+              (fileUrl && fileUrl.includes(cd)) ||
+              (localUrl && localUrl.includes(cd))
+            );
+          });
+        };
+
+        // Filter out any media items that were deleted
+        const filteredCloudMedia = (cloudData.media || []).filter((m) => !isDeletedItem(m));
+        const filteredLocalMedia = (localData.media || []).filter((m) => !isDeletedItem(m));
+
+        // Filter out deleted items from playlists
+        const cleanPlaylistItems = (playlists: Playlist[] = []): Playlist[] => {
+          return (playlists || []).map((pl) => ({
+            ...pl,
+            items: (pl.items || []).filter((it) => {
+              if (combinedDeletedIds.some((d) => d.toLowerCase() === String(it.media_id || '').toLowerCase())) {
+                return false;
+              }
+              if (it.file_url && combinedDeletedIds.some((d) => d.toLowerCase() === it.file_url?.toLowerCase())) {
+                return false;
+              }
+              return true;
+            }),
+          }));
+        };
+
+        const filteredCloudPlaylists = cleanPlaylistItems(cloudData.playlists);
+        const filteredLocalPlaylists = cleanPlaylistItems(localData.playlists);
+
+        const combinedSeededCompanies = Array.from(
+          new Set([...(cloudData.seeded_companies || []), ...(localData.seeded_companies || [])])
+        );
+
         this.data = {
           users: this.mergeById(cloudData.users, localData.users),
           companies: this.mergeById(cloudData.companies, localData.companies),
@@ -881,8 +939,8 @@ class DatabaseStore {
           plans: this.mergeById(cloudData.plans, localData.plans),
           players: this.mergeById(cloudData.players, localData.players),
           operators: this.mergeById(cloudData.operators, localData.operators),
-          playlists: this.mergeById(cloudData.playlists, localData.playlists),
-          media: this.mergeById(cloudData.media, localData.media),
+          playlists: this.mergeById(filteredCloudPlaylists, filteredLocalPlaylists),
+          media: this.mergeById(filteredCloudMedia, filteredLocalMedia),
           rss_feeds: this.mergeById(cloudData.rss_feeds, localData.rss_feeds),
           call_phrases: this.mergeById(cloudData.call_phrases, localData.call_phrases),
           player_calls: this.mergeById(cloudData.player_calls, localData.player_calls),
@@ -892,6 +950,8 @@ class DatabaseStore {
           r2_settings: cloudData.r2_settings || localData.r2_settings || this.data.r2_settings,
           proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs, localData.proof_of_play_logs).slice(-5000),
           sessions: Array.from(sessionMap.values()).slice(-200),
+          deleted_media_ids: combinedDeletedIds,
+          seeded_companies: combinedSeededCompanies,
         };
 
         try {
@@ -901,7 +961,7 @@ class DatabaseStore {
         }
         await saveDatabaseToFirestoreNow(this.data);
         console.log(
-          `[DatabaseStore] Restored & merged from Firebase Firestore! Loaded ${this.data.companies.length} companies, ${this.data.company_stores?.length || 0} stores, ${this.data.players.length} players, ${this.data.users.length} users.`
+          `[DatabaseStore] Restored & merged from Firebase Firestore! Loaded ${this.data.companies.length} companies, ${this.data.company_stores?.length || 0} stores, ${this.data.players.length} players, ${this.data.users.length} users, ${this.data.media.length} active media items (${combinedDeletedIds.length} tombstones maintained).`
         );
 
         // Verify that all companies have Weather & Clock and RSS media items loaded

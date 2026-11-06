@@ -42,20 +42,29 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   if (!media) return null;
 
   const [isPlaying, setIsPlaying] = useState(true);
+  const getInitialMediaSrc = (m: Media): string => {
+    if (m.type === 'video') {
+      if (m.local_url && m.local_url.startsWith('/uploads/')) return m.local_url;
+      if (m.id) return `/api/media/stream/${m.id}`;
+      if (m.file_url && m.file_url.startsWith('/uploads/')) return m.file_url;
+    }
+    return resolveMediaDisplayUrl(m.file_url);
+  };
+
   const [isMuted, setIsMuted] = useState(true);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState<number>(0);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
   const [imageError, setImageError] = useState(false);
   const [videoError, setVideoError] = useState(false);
-  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolveMediaDisplayUrl(media.file_url));
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => getInitialMediaSrc(media));
   const videoRef = useRef<HTMLVideoElement>(null);
 
   React.useEffect(() => {
     let isMounted = true;
-    const initial = resolveMediaDisplayUrl(media.file_url);
+    const initial = getInitialMediaSrc(media);
+    setResolvedSrc(initial);
     if (initial && initial.startsWith('data:')) {
-      setResolvedSrc(initial);
       return;
     }
     getIndexedDbMedia(media).then((rec) => {
@@ -68,7 +77,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [media.id, media.file_url]);
+  }, [media.id, media.file_url, (media as any).local_url]);
 
   const formatSeconds = (sec: number) => {
     const mins = Math.floor(sec / 60);
@@ -169,7 +178,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                 <>
                   <video
                     ref={videoRef}
-                    src={resolvedSrc || resolveMediaDisplayUrl(media.file_url)}
+                    src={resolvedSrc || getInitialMediaSrc(media)}
                     autoPlay
                     controls
                     muted={isMuted}

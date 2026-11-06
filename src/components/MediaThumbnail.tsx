@@ -43,19 +43,28 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
   allowHoverPlay = true,
   onPreview,
 }) => {
+  const getInitialMediaSrc = (m: any): string => {
+    if (m.type === 'video') {
+      if (m.local_url && m.local_url.startsWith('/uploads/')) return m.local_url;
+      if (m.id) return `/api/media/stream/${m.id}`;
+      if (m.file_url && m.file_url.startsWith('/uploads/')) return m.file_url;
+    }
+    return resolveMediaDisplayUrl(m.file_url);
+  };
+
   const [hasError, setHasError] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
-  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolveMediaDisplayUrl(media.file_url));
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => getInitialMediaSrc(media));
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     let isMounted = true;
-    const initial = resolveMediaDisplayUrl(media.file_url);
+    const initial = getInitialMediaSrc(media);
+    setResolvedSrc(initial);
     if (initial && initial.startsWith('data:')) {
-      setResolvedSrc(initial);
       return;
     }
     // Proactively check local cache or Firestore cloud binary if file_url is idb: or local upload
@@ -68,7 +77,7 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [media.id, media.file_url]);
+  }, [media.id, media.file_url, (media as any).local_url]);
 
   const handleMediaError = (target: HTMLImageElement | HTMLVideoElement) => {
     const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
@@ -270,7 +279,7 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
           <>
             <video
               ref={videoRef}
-              src={resolvedSrc || displayUrl}
+              src={resolvedSrc || getInitialMediaSrc(media) || displayUrl}
               muted
               playsInline
               preload="metadata"

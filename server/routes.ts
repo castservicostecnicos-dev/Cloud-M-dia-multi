@@ -1808,6 +1808,9 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[]): Playli
         name: media?.name || it.name || 'Mídia',
         type: media?.type || it.type || 'image',
         file_url: media?.file_url || it.file_url || '',
+        local_url: media?.local_url || (it as any).local_url || (media?.file_url?.startsWith('/uploads/') ? media.file_url : undefined),
+        drive_file_id: media?.drive_file_id || (it as any).drive_file_id || undefined,
+        drive_view_url: media?.drive_view_url || (it as any).drive_view_url || undefined,
       };
     }),
   };
@@ -2678,20 +2681,31 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 
   // 3. Register tombstone in deleted_media_ids so default seeder and drive scanners never resurrect it
   data.deleted_media_ids = data.deleted_media_ids || [];
-  if (!data.deleted_media_ids.includes(id)) {
-    data.deleted_media_ids.push(id);
-  }
-  if (targetMedia.name) {
-    data.deleted_media_ids.push(targetMedia.name.toLowerCase());
-  }
+  const tombstonesToAdd = [
+    id,
+    targetMedia.name?.toLowerCase(),
+    targetMedia.file_url,
+    targetMedia.local_url,
+    targetMedia.drive_file_id,
+    targetMedia.unique_code,
+  ];
   if (targetMedia.file_url) {
-    data.deleted_media_ids.push(targetMedia.file_url);
+    const fn = path.basename(targetMedia.file_url.split('?')[0]);
+    if (fn) tombstonesToAdd.push(fn);
   }
-  if (targetMedia.drive_file_id) {
-    data.deleted_media_ids.push(targetMedia.drive_file_id);
-    if (data.drive_documents) {
-      data.drive_documents = data.drive_documents.filter((d) => d.drive_file_id !== targetMedia.drive_file_id);
+  if (targetMedia.local_url) {
+    const fn = path.basename(targetMedia.local_url.split('?')[0]);
+    if (fn) tombstonesToAdd.push(fn);
+  }
+
+  for (const t of tombstonesToAdd) {
+    if (t && !data.deleted_media_ids.includes(t)) {
+      data.deleted_media_ids.push(t);
     }
+  }
+
+  if (targetMedia.drive_file_id && data.drive_documents) {
+    data.drive_documents = data.drive_documents.filter((d) => d.drive_file_id !== targetMedia.drive_file_id);
   }
 
   // 4. Delete object from Cloudflare R2 bucket
@@ -2712,11 +2726,23 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
       deleteMediaBinaryFromFirestore(fname).catch(() => {});
     }
   }
+  if (targetMedia.local_url) {
+    const fname = path.basename(targetMedia.local_url.split('?')[0]);
+    if (fname && fname !== targetMedia.id) {
+      deleteMediaBinaryFromFirestore(fname).catch(() => {});
+    }
+  }
 
   // 6. Delete file from local disk if present in uploads directory
+  const filesToDeleteFromDisk = new Set<string>();
   if (targetMedia.file_url && targetMedia.file_url.includes('/uploads/')) {
-    const filename = path.basename(targetMedia.file_url.split('?')[0]);
-    const filePath = path.join(uploadsDir, filename);
+    filesToDeleteFromDisk.add(path.basename(targetMedia.file_url.split('?')[0]));
+  }
+  if (targetMedia.local_url && targetMedia.local_url.includes('/uploads/')) {
+    filesToDeleteFromDisk.add(path.basename(targetMedia.local_url.split('?')[0]));
+  }
+  for (const fn of filesToDeleteFromDisk) {
+    const filePath = path.join(uploadsDir, fn);
     if (fs.existsSync(filePath)) {
       try {
         fs.unlinkSync(filePath);
@@ -2727,10 +2753,14 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
     }
   }
 
-  // 7. Persist changes to disk and cloud
+  // 7. Clear cached integrity audit reports so "Ver Detalhes" NEVER displays deleted media!
+  integrityReportsCache.delete(`company_${companyId}`);
+  integrityReportsCache.delete('admin_global');
+
+  // 8. Persist changes to disk and cloud
   db.persist();
 
-  // 8. Inform active players and dashboards to update immediately
+  // 9. Inform active players and dashboards to update immediately
   try {
     realtimeHub.broadcastMediaChange(companyId, 'deleted', id);
     realtimeHub.sendRestartCommand({
@@ -2740,7 +2770,7 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
   } catch {}
 
   res.json({
-    message: `Mídia "${targetMedia.name}" excluída com sucesso do sistema e do Cloudflare R2.`,
+    message: `Mídia "${targetMedia.name}" excluída com sucesso do sistema, do Cloudflare R2 e do disco local.`,
     deletedId: id,
   });
 });
@@ -2854,7 +2884,26 @@ apiRouter.get('/company/media/integrity-status', requireAuth, requireRole('compa
     : user.company_id!;
   const report = integrityReportsCache.get(`company_${companyId}`);
   if (report) {
-    return res.json(report);
+    // Filter out any media items that were deleted so details modal never reports deleted media!
+    const existingMediaIds = new Set(data.media.map((m) => m.id));
+    const validIssues = (report.issues || []).filter(
+      (iss) => existingMediaIds.has(iss.media_id) && !isMediaOrUrlDeleted(data, iss.media_id)
+    );
+    const validItems = (report.items || []).filter(
+      (it) => existingMediaIds.has(it.media_id) && !isMediaOrUrlDeleted(data, it.media_id)
+    );
+
+    return res.json({
+      ...report,
+      has_issues: validIssues.length > 0,
+      issues: validIssues,
+      items: validItems,
+      summary: {
+        total: validItems.length,
+        with_issues: validIssues.length,
+        healthy: validItems.filter((it) => it.healthy).length,
+      },
+    });
   }
   res.json({ checked_at: null, has_issues: false, summary: null, issues: [], items: [] });
 });
@@ -3657,6 +3706,9 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
             name: m.name,
             type: m.type,
             file_url: m.file_url,
+            local_url: m.local_url || (m.file_url?.startsWith('/uploads/') ? m.file_url : undefined),
+            drive_file_id: m.drive_file_id,
+            drive_view_url: m.drive_view_url,
             // Sugestão 1: Agendamento Inteligente
             schedule_enabled: Boolean(it.schedule_enabled),
             schedule_days: it.schedule_days,
@@ -5301,7 +5353,9 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
 
     // 1. Try local file in uploadsDir if present
     let localFilename = '';
-    if (media?.file_url?.startsWith('/uploads/')) {
+    if (media?.local_url && media.local_url.startsWith('/uploads/')) {
+      localFilename = path.basename(media.local_url.split('?')[0]);
+    } else if (media?.file_url?.startsWith('/uploads/')) {
       localFilename = path.basename(media.file_url.split('?')[0]);
     } else if (id.startsWith('media-') || id.includes('.')) {
       localFilename = path.basename(id.split('?')[0]);
@@ -5355,7 +5409,7 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     }
 
     // 2. Try Cloudflare R2 object
-    const targetKey = media?.file_url || id;
+    const targetKey = (media as any)?.r2_url || media?.file_url || id;
     const r2Obj = await getObjectFromR2(targetKey, rangeHeader ? String(rangeHeader) : undefined);
     if (r2Obj && r2Obj.body) {
       res.setHeader('Access-Control-Allow-Origin', '*');
