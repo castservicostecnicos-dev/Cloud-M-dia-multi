@@ -1134,9 +1134,6 @@ apiRouter.delete('/admin/plans/:id', requireAuth, requireRole('admin'), (req, re
 apiRouter.get('/company/stats', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
   const companyId = req.user!.company_id!;
   const data = db.getData();
-  if (ensureCompanyDefaultMedia(companyId, data)) {
-    db.persist();
-  }
   const now = Date.now();
 
   const company = data.companies.find((c) => c.id === companyId);
@@ -1822,13 +1819,6 @@ apiRouter.get('/company/playlists', requireAuth, requireRole('company', 'admin')
     ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
     : req.user!.company_id!;
 
-  if (companyId) {
-    const injected = ensureCompanyDefaultMedia(companyId, data);
-    if (injected) {
-      db.persist();
-    }
-  }
-
   const playlists = (companyId
     ? data.playlists.filter((p) => p.company_id === companyId)
     : data.playlists
@@ -2473,13 +2463,6 @@ apiRouter.get('/company/media', requireAuth, requireRole('company', 'admin'), (r
     ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
     : req.user!.company_id!;
 
-  if (companyId) {
-    const injected = ensureCompanyDefaultMedia(companyId, data);
-    if (injected) {
-      db.persist();
-    }
-  }
-
   const media = companyId
     ? data.media.filter((m) => m.company_id === companyId)
     : (req.user!.role === 'admin' ? data.media : []);
@@ -2706,6 +2689,16 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 
   if (targetMedia.drive_file_id && data.drive_documents) {
     data.drive_documents = data.drive_documents.filter((d) => d.drive_file_id !== targetMedia.drive_file_id);
+  }
+
+  // If deleted media is an RSS feed, also remove from rss_feeds list
+  if (targetMedia.type === 'rss') {
+    data.rss_feeds = (data.rss_feeds || []).filter(
+      (r) =>
+        r.id !== targetMedia.id &&
+        r.url !== targetMedia.file_url &&
+        r.name.toLowerCase() !== targetMedia.name?.toLowerCase()
+    );
   }
 
   // 4. Delete object from Cloudflare R2 bucket
@@ -2957,11 +2950,13 @@ apiRouter.get('/company/rss/presets', requireAuth, (_req, res) => {
   res.json(DEFAULT_RSS_FEEDS);
 });
 
-apiRouter.post('/company/rss/load-defaults', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/rss/load-defaults', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.body?.companyId || req.query?.company_id as string || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
   const now = new Date().toISOString();
-  seedDefaultRssFeedsForCompany(companyId, data, now);
+  seedDefaultRssFeedsForCompany(companyId, data, now, true);
   db.persist();
 
   const feeds = data.rss_feeds.filter((r) => r.company_id === companyId);
@@ -2971,22 +2966,26 @@ apiRouter.post('/company/rss/load-defaults', requireAuth, requireRole('company')
   });
 });
 
-apiRouter.get('/company/rss', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.get('/company/rss', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.query?.company_id as string || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
   const feeds = data.rss_feeds.filter((r) => r.company_id === companyId);
   res.json(feeds);
 });
 
-apiRouter.post('/company/rss', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/rss', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+  const data = db.getData();
+  const companyId = req.user!.role === 'admin'
+    ? ((req.body?.companyId || req.query?.company_id as string || data.companies[0]?.id) as string)
+    : req.user!.company_id!;
   const { name, url } = req.body;
 
   if (!name || !url) {
     return res.status(400).json({ error: 'Nome e URL do RSS são obrigatórios.' });
   }
 
-  const data = db.getData();
   const now = new Date().toISOString();
   const newRss: RssFeed = {
     id: `rss-${Date.now()}`,
@@ -3004,11 +3003,11 @@ apiRouter.post('/company/rss', requireAuth, requireRole('company'), (req: Authen
   res.status(201).json(newRss);
 });
 
-apiRouter.put('/company/rss/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.put('/company/rss/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const data = db.getData();
-  const rss = data.rss_feeds.find((r) => r.id === id && r.company_id === companyId);
+  const user = req.user!;
+  const rss = data.rss_feeds.find((r) => r.id === id && (user.role === 'admin' || r.company_id === user.company_id));
   if (!rss) {
     return res.status(404).json({ error: 'Feed RSS não encontrado.' });
   }
@@ -3023,11 +3022,11 @@ apiRouter.put('/company/rss/:id', requireAuth, requireRole('company'), (req: Aut
   res.json(rss);
 });
 
-apiRouter.post('/company/rss/:id/toggle-status', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.post('/company/rss/:id/toggle-status', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const data = db.getData();
-  const rss = data.rss_feeds.find((r) => r.id === id && r.company_id === companyId);
+  const user = req.user!;
+  const rss = data.rss_feeds.find((r) => r.id === id && (user.role === 'admin' || r.company_id === user.company_id));
   if (!rss) {
     return res.status(404).json({ error: 'Feed RSS não encontrado.' });
   }
@@ -3042,19 +3041,74 @@ apiRouter.post('/company/rss/:id/toggle-status', requireAuth, requireRole('compa
   });
 });
 
-apiRouter.delete('/company/rss/:id', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.delete('/company/rss/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const data = db.getData();
-  const idx = data.rss_feeds.findIndex((r) => r.id === id && r.company_id === companyId);
+  const user = req.user!;
+  const idx = data.rss_feeds.findIndex((r) => r.id === id && (user.role === 'admin' || r.company_id === user.company_id));
   if (idx === -1) {
     return res.status(404).json({ error: 'Feed RSS não encontrado.' });
   }
 
+  const deletedRss = data.rss_feeds[idx];
+  const companyId = deletedRss.company_id;
+
+  // 1. Remove from rss_feeds
   data.rss_feeds.splice(idx, 1);
+
+  // 2. Add tombstones to deleted_media_ids so it never resurrects
+  data.deleted_media_ids = data.deleted_media_ids || [];
+  const tombstones = [deletedRss.id, deletedRss.url, deletedRss.name, deletedRss.name.toLowerCase()];
+  for (const t of tombstones) {
+    if (t && !data.deleted_media_ids.includes(t)) {
+      data.deleted_media_ids.push(t);
+    }
+  }
+
+  // 3. Remove matching media items from data.media
+  const deletedMediaIds: string[] = [];
+  data.media = data.media.filter((m) => {
+    const isMatch = m.type === 'rss' && (
+      m.id === deletedRss.id ||
+      m.file_url === deletedRss.url ||
+      m.name.toLowerCase() === deletedRss.name.toLowerCase()
+    );
+    if (isMatch) {
+      deletedMediaIds.push(m.id);
+      if (!data.deleted_media_ids.includes(m.id)) data.deleted_media_ids.push(m.id);
+      return false;
+    }
+    return true;
+  });
+
+  // 4. Remove from all playlists
+  for (const pl of data.playlists) {
+    if (pl.items) {
+      pl.items = pl.items.filter(
+        (it) =>
+          it.media_id !== deletedRss.id &&
+          !deletedMediaIds.includes(it.media_id) &&
+          it.file_url !== deletedRss.url
+      );
+    }
+  }
+
+  // 5. Clear integrity audit cache
+  integrityReportsCache.delete(`company_${companyId}`);
+  integrityReportsCache.delete('admin_global');
+
   db.persist();
 
-  res.json({ message: 'Feed RSS excluído com sucesso.' });
+  // 6. Broadcast deletion in real-time
+  try {
+    realtimeHub.broadcastMediaChange(companyId, 'deleted', id);
+    realtimeHub.sendRestartCommand({
+      companyId,
+      reason: `Feed RSS "${deletedRss.name}" excluído`,
+    });
+  } catch {}
+
+  res.json({ message: 'Feed RSS excluído com sucesso.', deletedId: id });
 });
 
 // In-memory RSS cache (TTL: 5 minutes) to ensure instantaneous response and avoid rate-limits
@@ -3692,23 +3746,39 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
   }> = [];
 
   if (player.playlist_id) {
-    playlist = data.playlists.find((pl) => pl.id === player?.playlist_id && pl.active);
+    playlist = data.playlists.find((pl) => pl.id === player?.playlist_id && pl.active !== false);
     if (playlist) {
-      itemsWithMedia = playlist.items
+      itemsWithMedia = (playlist.items || [])
         .map((it) => {
-          const m = data.media.find((media) => media.id === it.media_id && media.active);
-          if (!m) return null;
+          // Never return items that were explicitly deleted
+          const isDeleted = isMediaOrUrlDeleted(data, it.media_id) || (it.file_url && isMediaOrUrlDeleted(data, it.file_url));
+          if (isDeleted) return null;
+
+          const m = data.media.find((media) => media.id === it.media_id);
+          // If media was removed from data.media, do not send phantom items to player (except dynamic weather widget)
+          if (!m && it.type !== 'weather_clock') return null;
+          // If media exists and is explicitly marked inactive, skip it
+          if (m && m.active === false) return null;
+
+          const mediaType = m?.type || it.type || (it.file_url?.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'image');
+          const mediaName = m?.name || it.name || 'Mídia';
+          const mediaFileUrl = m?.file_url || it.file_url || '';
+          const mediaLocalUrl = m?.local_url || (it as any).local_url || (mediaFileUrl?.startsWith('/uploads/') ? mediaFileUrl : undefined);
+
+          // If no media object and no file_url, and not weather_clock/rss, skip invalid item
+          if (!m && !mediaFileUrl && mediaType !== 'weather_clock') return null;
+
           return {
             id: it.id,
             media_id: it.media_id,
             position: it.position,
-            duration: it.duration || m.duration || 10,
-            name: m.name,
-            type: m.type,
-            file_url: m.file_url,
-            local_url: m.local_url || (m.file_url?.startsWith('/uploads/') ? m.file_url : undefined),
-            drive_file_id: m.drive_file_id,
-            drive_view_url: m.drive_view_url,
+            duration: it.duration || m?.duration || (mediaType === 'video' ? 15 : 10),
+            name: mediaName,
+            type: mediaType,
+            file_url: mediaFileUrl,
+            local_url: mediaLocalUrl,
+            drive_file_id: m?.drive_file_id || (it as any).drive_file_id,
+            drive_view_url: m?.drive_view_url || (it as any).drive_view_url,
             // Sugestão 1: Agendamento Inteligente
             schedule_enabled: Boolean(it.schedule_enabled),
             schedule_days: it.schedule_days,

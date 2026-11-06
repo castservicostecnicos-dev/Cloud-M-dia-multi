@@ -816,7 +816,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     const durationSec = item?.duration || 10;
 
     if (item?.type === 'video') {
-      return;
+      // Safety fallback timer: advance if video stalls or finishes without onEnded firing
+      const fallbackMs = Math.max(8000, (durationSec + 4) * 1000);
+      const timer = setTimeout(() => {
+        advanceNextMedia();
+      }, fallbackMs);
+
+      return () => clearTimeout(timer);
     }
 
     const timer = setTimeout(() => {
@@ -1025,36 +1031,69 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                 }
                 autoPlay
                 playsInline
+                preload="auto"
+                muted={Boolean(data.player.master_muted || currentMedia.is_muted)}
+                onCanPlay={(e) => {
+                  const v = e.currentTarget;
+                  const playPromise = v.play();
+                  if (playPromise !== undefined) {
+                    playPromise.catch((err) => {
+                      // Autoplay restriction: browser blocked unmuted playback -> mute and resume
+                      v.muted = true;
+                      v.play().catch(() => {});
+                    });
+                  }
+                }}
                 onEnded={handleVideoEnded}
                 onError={(e) => {
                   const target = e.currentTarget;
                   const streamUrl = `/api/media/stream/${currentMedia.media_id || currentMedia.id}`;
-                  if (target.src && !target.src.includes('/api/media/stream/')) {
-                    target.src = streamUrl;
+                  const directUrl = resolveMediaUrl(currentMedia.file_url);
+
+                  // 1. If currently using stream proxy and direct cloud/R2 URL exists, try direct URL
+                  if (directUrl && target.src && target.src.includes('/api/media/stream/') && !target.src.includes(directUrl)) {
+                    target.src = directUrl;
+                    target.load();
                     return;
                   }
+
+                  // 2. If direct URL failed, try stream proxy
+                  if (streamUrl && target.src && !target.src.includes('/api/media/stream/')) {
+                    target.src = streamUrl;
+                    target.load();
+                    return;
+                  }
+
+                  // 3. Try local URL if available
                   if ((currentMedia as any)?.local_url && target.src !== (currentMedia as any).local_url) {
                     target.src = (currentMedia as any).local_url;
+                    target.load();
                     return;
                   }
+
+                  // 4. Try Google Drive if applicable
                   const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
                   if (driveId && !(target.src || '').includes('uc?export=download')) {
                     target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
+                    target.load();
                     return;
                   }
+
+                  // 5. Try IndexedDB offline storage
                   getIndexedDbMedia(currentMedia).then((rec) => {
                     if (rec && target.src !== rec) {
                       target.src = rec;
+                      target.load();
                     } else {
-                      console.warn('Erro ao reproduzir vídeo ou codec offline, avançando para próxima mídia:', e);
+                      console.warn('Erro ao carregar vídeo em todas as fontes disponíveis, avançando para próxima mídia:', e);
                       setTimeout(() => {
                         advanceNextMedia();
-                      }, 2000);
+                      }, 1500);
                     }
                   }).catch(() => {
                     setTimeout(() => {
                       advanceNextMedia();
-                    }, 2000);
+                    }, 1500);
                   });
                 }}
                 className="h-full w-full object-cover"

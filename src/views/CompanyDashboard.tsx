@@ -2011,6 +2011,16 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         try {
           // Immediately purge from client state so UI never reflects the deleted media
           setMediaList((prev) => prev.filter((m) => m.id !== media.id));
+          if (media.type === 'rss') {
+            setRssList((prev) =>
+              prev.filter(
+                (r) =>
+                  r.id !== media.id &&
+                  r.url !== media.file_url &&
+                  r.name.toLowerCase() !== media.name?.toLowerCase()
+              )
+            );
+          }
           setPlaylists((prev) =>
             prev.map((pl) => ({
               ...pl,
@@ -2175,10 +2185,43 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       message: `Tem certeza que deseja remover o feed "${rss.name}"?`,
       action: async () => {
         try {
+          // Immediately purge from client state so it never reappears
+          setRssList((prev) => prev.filter((r) => r.id !== rss.id));
+          setMediaList((prev) =>
+            prev.filter(
+              (m) =>
+                !(
+                  m.type === 'rss' &&
+                  (m.file_url === rss.url || m.name.toLowerCase() === rss.name.toLowerCase() || m.id === rss.id)
+                )
+            )
+          );
+          setPlaylists((prev) =>
+            prev.map((pl) => ({
+              ...pl,
+              items: (pl.items || []).filter(
+                (it) => it.media_id !== rss.id && it.file_url !== rss.url
+              ),
+            }))
+          );
+
+          // Clear IndexedDB cache for RSS URL or ID
+          deleteIndexedDbMedia(rss.id).catch(() => {});
+          if (rss.url) deleteIndexedDbMedia(rss.url).catch(() => {});
+
           const res = await api.deleteCompanyRss(rss.id);
           showToast('success', res.message);
           setConfirmData((p) => ({ ...p, isOpen: false }));
           loadData();
+
+          // Broadcast deletion to other tabs & windows
+          try {
+            if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+              const bc = new BroadcastChannel('indoor_media_calls');
+              bc.postMessage({ type: 'MEDIA_CHANGED', action: 'deleted', mediaId: rss.id, timestamp: Date.now() });
+            }
+            localStorage.setItem('indoor_media_updated_at', String(Date.now()));
+          } catch {}
         } catch (err: any) {
           showToast('error', err.message);
         }

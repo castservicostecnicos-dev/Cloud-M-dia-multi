@@ -312,18 +312,35 @@ export function getCachedIndexedDbMediaSync(keyOrIdOrMedia: any): string | null 
   return null;
 }
 
-export async function deleteIndexedDbMedia(id: string): Promise<void> {
-  const cleanId = id.replace(/^idb:/, '').replace(/^\/uploads\//, '');
-  memoryCache.delete(cleanId);
+export async function deleteIndexedDbMedia(keyOrIdOrMedia: any): Promise<void> {
+  if (!keyOrIdOrMedia) return;
+  const candidates = getMediaCandidateKeys(keyOrIdOrMedia);
+  if (typeof keyOrIdOrMedia === 'string') {
+    const raw = keyOrIdOrMedia.trim();
+    if (raw) {
+      candidates.push(raw);
+      candidates.push(raw.replace(/^idb:/, '').replace(/^\/uploads\//, ''));
+    }
+  }
+
+  for (const c of candidates) {
+    memoryCache.delete(c);
+  }
 
   try {
     const db = await openMediaDB();
     await new Promise<void>((resolve) => {
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.delete(cleanId);
-      req.onsuccess = () => resolve();
-      req.onerror = () => resolve();
+      try {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        for (const c of candidates) {
+          store.delete(c);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch {
+        resolve();
+      }
     });
   } catch {}
 }

@@ -195,7 +195,15 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                     onError={(e) => {
                       const target = e.currentTarget;
                       const streamProxyUrl = `/api/media/stream/${media.id}`;
-                      if (target.src && !target.src.includes('/api/media/stream/')) {
+                      const directUrl = resolveMediaDisplayUrl(media.file_url);
+
+                      if (directUrl && target.src && target.src.includes('/api/media/stream/') && !target.src.includes(directUrl)) {
+                        target.src = directUrl;
+                        setResolvedSrc(directUrl);
+                        return;
+                      }
+
+                      if (streamProxyUrl && target.src && !target.src.includes('/api/media/stream/')) {
                         target.src = streamProxyUrl;
                         setResolvedSrc(streamProxyUrl);
                         return;

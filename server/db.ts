@@ -326,9 +326,16 @@ export function ensureCompanyDefaultMedia(
 export function seedDefaultRssFeedsForCompany(
   companyId: string,
   data: DatabaseSchema,
-  now: string = new Date().toISOString()
+  now: string = new Date().toISOString(),
+  forceExplicit: boolean = false
 ): void {
   data.deleted_media_ids = data.deleted_media_ids || [];
+  data.seeded_companies = data.seeded_companies || [];
+
+  // If already seeded and not an explicit request from user, never re-inject!
+  if (!forceExplicit && data.seeded_companies.includes(companyId)) {
+    return;
+  }
 
   DEFAULT_RSS_FEEDS.forEach((feed, idx) => {
     if (isMediaOrUrlDeleted(data, feed.url) || isMediaOrUrlDeleted(data, feed.name)) {
@@ -351,41 +358,6 @@ export function seedDefaultRssFeedsForCompany(
       });
     }
   });
-
-  // Ensure default Full-Screen RSS Media item exists only if not deleted
-  const defaultRssUrl = 'https://g1.globo.com/rss/g1/saude/';
-  const defaultRssName = 'Notícias RSS - Saúde & Bem-Estar';
-  if (isMediaOrUrlDeleted(data, defaultRssUrl) || isMediaOrUrlDeleted(data, defaultRssName)) {
-    return;
-  }
-
-  const hasRssMedia = data.media.some((m) => m.company_id === companyId && m.type === 'rss');
-  if (!hasRssMedia) {
-    const rssMediaId = `med-${Date.now()}-rss-saude`;
-    data.media.push({
-      id: rssMediaId,
-      company_id: companyId,
-      name: defaultRssName,
-      type: 'rss',
-      file_url: defaultRssUrl,
-      duration: 15,
-      active: true,
-      created_at: now,
-      updated_at: now,
-    });
-
-    const pl = data.playlists?.find((p) => p.company_id === companyId);
-    if (pl && !pl.items.some((it) => it.media_id === rssMediaId)) {
-      pl.items.push({
-        id: `pli-${Date.now()}-rss`,
-        playlist_id: pl.id,
-        media_id: rssMediaId,
-        position: pl.items.length + 1,
-        duration: 15,
-        created_at: now,
-      });
-    }
-  }
 }
 
 export interface CallPhrase {
@@ -649,6 +621,24 @@ class DatabaseStore {
           for (const p of this.data.players) {
             if (!p.orientation) {
               p.orientation = p.code?.includes('SALA') ? 'vertical' : 'horizontal';
+              changed = true;
+            }
+          }
+        }
+
+        // Normalize active state on media and playlists so uploaded items are never skipped
+        if (this.data.media) {
+          for (const m of this.data.media) {
+            if (m.active === undefined) {
+              m.active = true;
+              changed = true;
+            }
+          }
+        }
+        if (this.data.playlists) {
+          for (const pl of this.data.playlists) {
+            if (pl.active === undefined) {
+              pl.active = true;
               changed = true;
             }
           }
@@ -932,6 +922,9 @@ class DatabaseStore {
           new Set([...(cloudData.seeded_companies || []), ...(localData.seeded_companies || [])])
         );
 
+        const filteredCloudRss = (cloudData.rss_feeds || []).filter((r) => !isDeletedItem(r));
+        const filteredLocalRss = (localData.rss_feeds || []).filter((r) => !isDeletedItem(r));
+
         this.data = {
           users: this.mergeById(cloudData.users, localData.users),
           companies: this.mergeById(cloudData.companies, localData.companies),
@@ -939,9 +932,15 @@ class DatabaseStore {
           plans: this.mergeById(cloudData.plans, localData.plans),
           players: this.mergeById(cloudData.players, localData.players),
           operators: this.mergeById(cloudData.operators, localData.operators),
-          playlists: this.mergeById(filteredCloudPlaylists, filteredLocalPlaylists),
-          media: this.mergeById(filteredCloudMedia, filteredLocalMedia),
-          rss_feeds: this.mergeById(cloudData.rss_feeds, localData.rss_feeds),
+          playlists: this.mergeById(filteredCloudPlaylists, filteredLocalPlaylists).map((pl) => ({
+            ...pl,
+            active: pl.active !== false,
+          })),
+          media: this.mergeById(filteredCloudMedia, filteredLocalMedia).map((m) => ({
+            ...m,
+            active: m.active !== false,
+          })),
+          rss_feeds: this.mergeById(filteredCloudRss, filteredLocalRss),
           call_phrases: this.mergeById(cloudData.call_phrases, localData.call_phrases),
           player_calls: this.mergeById(cloudData.player_calls, localData.player_calls),
           sub_clients: this.mergeById(cloudData.sub_clients, localData.sub_clients),
@@ -963,25 +962,6 @@ class DatabaseStore {
         console.log(
           `[DatabaseStore] Restored & merged from Firebase Firestore! Loaded ${this.data.companies.length} companies, ${this.data.company_stores?.length || 0} stores, ${this.data.players.length} players, ${this.data.users.length} users, ${this.data.media.length} active media items (${combinedDeletedIds.length} tombstones maintained).`
         );
-
-        // Verify that all companies have Weather & Clock and RSS media items loaded
-        if (this.data.companies && this.data.media) {
-          const now = new Date().toISOString();
-          let anyAdded = false;
-          for (const comp of this.data.companies) {
-            if (ensureCompanyDefaultMedia(comp.id, this.data, now)) {
-              anyAdded = true;
-            }
-          }
-          if (anyAdded) {
-            try {
-              fs.writeFileSync(dbPath, JSON.stringify(this.data, null, 2), 'utf-8');
-              await saveDatabaseToFirestoreNow(this.data);
-            } catch (e) {
-              console.warn('[DatabaseStore] Could not write default media cache to disk:', e);
-            }
-          }
-        }
       } else if (res.status === 'not_found') {
         console.log('[DatabaseStore] No prior Firestore document found. Initializing Firestore with current database...');
         await saveDatabaseToFirestoreNow(this.data);
