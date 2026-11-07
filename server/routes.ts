@@ -21,6 +21,9 @@ import {
   seedDefaultRssFeedsForCompany,
   ensureCompanyDefaultMedia,
   isMediaOrUrlDeleted,
+  isItemObjectDeleted,
+  cleanFeedOrMediaName,
+  normalizeMediaUrl,
   DEFAULT_RSS_FEEDS,
   DEFAULT_PLANS,
   uploadsDir,
@@ -29,7 +32,12 @@ import {
 } from './db.js';
 import { realtimeHub } from './realtime.js';
 import { runMediaIntegrityAudit, MediaIntegrityAuditReport } from './mediaIntegrity.js';
-import { saveMediaBinaryToFirestore, deleteMediaBinaryFromFirestore, loadMediaBinaryFromFirestore } from './firestore.js';
+import {
+  saveMediaBinaryToFirestore,
+  deleteMediaBinaryFromFirestore,
+  loadMediaBinaryFromFirestore,
+  saveDatabaseToFirestoreNow,
+} from './firestore.js';
 import {
   uploadToR2,
   getEffectiveR2Config,
@@ -1795,10 +1803,14 @@ apiRouter.delete('/company/operators/:id', requireAuth, requireRole('company'), 
 });
 
 // Playlists Management
-function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[]): Playlist {
+function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: any): Playlist {
+  const activeItems = (playlist.items || []).filter((it) => {
+    if (data && isItemObjectDeleted(data, it)) return false;
+    return true;
+  });
   return {
     ...playlist,
-    items: (playlist.items || []).map((it) => {
+    items: activeItems.map((it) => {
       const media = mediaList.find((m) => m.id === it.media_id);
       return {
         ...it,
@@ -1823,7 +1835,7 @@ apiRouter.get('/company/playlists', requireAuth, requireRole('company', 'admin')
     ? data.playlists.filter((p) => p.company_id === companyId)
     : data.playlists
   ).map((p) => {
-    const enriched = enrichPlaylistWithMedia(p, data.media);
+    const enriched = enrichPlaylistWithMedia(p, data.media, data);
     const store = (data.company_stores || []).find((s) => s.id === p.store_id);
     return {
       ...enriched,
@@ -2464,8 +2476,8 @@ apiRouter.get('/company/media', requireAuth, requireRole('company', 'admin'), (r
     : req.user!.company_id!;
 
   const media = companyId
-    ? data.media.filter((m) => m.company_id === companyId)
-    : (req.user!.role === 'admin' ? data.media : []);
+    ? data.media.filter((m) => m.company_id === companyId && !isItemObjectDeleted(data, m))
+    : (req.user!.role === 'admin' ? data.media.filter((m) => !isItemObjectDeleted(data, m)) : []);
   res.json(media);
 });
 
@@ -2664,11 +2676,14 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 
   // 3. Register tombstone in deleted_media_ids so default seeder and drive scanners never resurrect it
   data.deleted_media_ids = data.deleted_media_ids || [];
-  const tombstonesToAdd = [
+  const tombstonesToAdd: (string | undefined)[] = [
     id,
     targetMedia.name?.toLowerCase(),
+    cleanFeedOrMediaName(targetMedia.name),
     targetMedia.file_url,
+    normalizeMediaUrl(targetMedia.file_url),
     targetMedia.local_url,
+    normalizeMediaUrl(targetMedia.local_url),
     targetMedia.drive_file_id,
     targetMedia.unique_code,
   ];
@@ -2692,14 +2707,15 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
   }
 
   // If deleted media is an RSS feed, also remove from rss_feeds list
-  if (targetMedia.type === 'rss') {
-    data.rss_feeds = (data.rss_feeds || []).filter(
-      (r) =>
-        r.id !== targetMedia.id &&
-        r.url !== targetMedia.file_url &&
-        r.name.toLowerCase() !== targetMedia.name?.toLowerCase()
-    );
+  if (targetMedia.type === 'rss' || targetMedia.file_url?.match(/\.xml($|\?)|rss/i)) {
+    data.rss_feeds = (data.rss_feeds || []).filter((r) => !isItemObjectDeleted(data, r));
   }
+
+  // Clean all playlist items
+  data.playlists = data.playlists.map((pl) => ({
+    ...pl,
+    items: (pl.items || []).filter((it) => it.media_id !== id && !isItemObjectDeleted(data, it)),
+  }));
 
   // 4. Delete object from Cloudflare R2 bucket
   if (targetMedia.file_url) {
@@ -2752,6 +2768,7 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 
   // 8. Persist changes to disk and cloud
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   // 9. Inform active players and dashboards to update immediately
   try {
@@ -2971,7 +2988,7 @@ apiRouter.get('/company/rss', requireAuth, requireRole('company', 'admin'), (req
   const companyId = req.user!.role === 'admin'
     ? ((req.query?.company_id as string || data.companies[0]?.id) as string)
     : req.user!.company_id!;
-  const feeds = data.rss_feeds.filter((r) => r.company_id === companyId);
+  const feeds = data.rss_feeds.filter((r) => r.company_id === companyId && !isItemObjectDeleted(data, r));
   res.json(feeds);
 });
 
@@ -2984,6 +3001,19 @@ apiRouter.post('/company/rss', requireAuth, requireRole('company', 'admin'), (re
 
   if (!name || !url) {
     return res.status(400).json({ error: 'Nome e URL do RSS são obrigatórios.' });
+  }
+
+  // If user is re-adding a previously deleted feed, un-tombstone it
+  const normUrl = normalizeMediaUrl(url);
+  const cleanName = cleanFeedOrMediaName(name);
+  if (data.deleted_media_ids) {
+    data.deleted_media_ids = data.deleted_media_ids.filter((d) => {
+      const rawD = String(d).trim().toLowerCase();
+      if (rawD === url.toLowerCase() || rawD === name.toLowerCase()) return false;
+      if (normUrl && normalizeMediaUrl(d) === normUrl) return false;
+      if (cleanName && cleanFeedOrMediaName(d) === cleanName) return false;
+      return true;
+    });
   }
 
   const now = new Date().toISOString();
@@ -2999,6 +3029,7 @@ apiRouter.post('/company/rss', requireAuth, requireRole('company', 'admin'), (re
 
   data.rss_feeds.push(newRss);
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   res.status(201).json(newRss);
 });
@@ -3019,6 +3050,7 @@ apiRouter.put('/company/rss/:id', requireAuth, requireRole('company', 'admin'), 
   rss.updated_at = new Date().toISOString();
 
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
   res.json(rss);
 });
 
@@ -3034,6 +3066,7 @@ apiRouter.post('/company/rss/:id/toggle-status', requireAuth, requireRole('compa
   rss.active = !rss.active;
   rss.updated_at = new Date().toISOString();
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   res.json({
     message: rss.active ? 'RSS ativado com sucesso.' : 'RSS desativado com sucesso.',
@@ -3041,70 +3074,117 @@ apiRouter.post('/company/rss/:id/toggle-status', requireAuth, requireRole('compa
   });
 });
 
-apiRouter.delete('/company/rss/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.delete('/company/rss/:id', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const data = db.getData();
   const user = req.user!;
-  const idx = data.rss_feeds.findIndex((r) => r.id === id && (user.role === 'admin' || r.company_id === user.company_id));
-  if (idx === -1) {
-    return res.status(404).json({ error: 'Feed RSS não encontrado.' });
+  const targetIdLower = String(id).trim().toLowerCase();
+  const targetUrlNorm = normalizeMediaUrl(id);
+  const targetNameClean = cleanFeedOrMediaName(id);
+
+  // 1. Locate matching RSS feed in rss_feeds
+  const deletedRss = data.rss_feeds.find(
+    (r) =>
+      (user.role === 'admin' || r.company_id === user.company_id) &&
+      (r.id.toLowerCase() === targetIdLower ||
+        normalizeMediaUrl(r.url) === targetUrlNorm ||
+        r.url.toLowerCase() === targetIdLower ||
+        r.name.toLowerCase() === targetIdLower ||
+        cleanFeedOrMediaName(r.name) === targetNameClean)
+  );
+
+  // 2. Also locate matching RSS media in data.media
+  const matchingMedia = data.media.filter(
+    (m) =>
+      (user.role === 'admin' || m.company_id === user.company_id) &&
+      (m.type === 'rss' || m.file_url?.match(/\.xml($|\?)|rss/i)) &&
+      (m.id.toLowerCase() === targetIdLower ||
+        normalizeMediaUrl(m.file_url) === targetUrlNorm ||
+        m.file_url.toLowerCase() === targetIdLower ||
+        m.name.toLowerCase() === targetIdLower ||
+        cleanFeedOrMediaName(m.name) === targetNameClean ||
+        (deletedRss && (
+          m.id === deletedRss.id ||
+          normalizeMediaUrl(m.file_url) === normalizeMediaUrl(deletedRss.url) ||
+          cleanFeedOrMediaName(m.name) === cleanFeedOrMediaName(deletedRss.name)
+        )))
+  );
+
+  if (!deletedRss && matchingMedia.length === 0) {
+    // If not found in memory, still record the tombstone to be safe
+    data.deleted_media_ids = data.deleted_media_ids || [];
+    if (!data.deleted_media_ids.includes(id)) data.deleted_media_ids.push(id);
+    if (targetUrlNorm && !data.deleted_media_ids.includes(targetUrlNorm)) data.deleted_media_ids.push(targetUrlNorm);
+    db.persist();
+    saveDatabaseToFirestoreNow(data).catch(() => {});
+    return res.json({ message: 'Feed RSS excluído com sucesso.', deletedId: id });
   }
 
-  const deletedRss = data.rss_feeds[idx];
-  const companyId = deletedRss.company_id;
+  const companyId = deletedRss?.company_id || matchingMedia[0]?.company_id || user.company_id || data.companies[0]?.id;
+  const feedName = deletedRss?.name || matchingMedia[0]?.name || 'Feed RSS';
 
-  // 1. Remove from rss_feeds
-  data.rss_feeds.splice(idx, 1);
-
-  // 2. Add tombstones to deleted_media_ids so it never resurrects
+  // 3. Collect comprehensive tombstones
   data.deleted_media_ids = data.deleted_media_ids || [];
-  const tombstones = [deletedRss.id, deletedRss.url, deletedRss.name, deletedRss.name.toLowerCase()];
-  for (const t of tombstones) {
+  const tombstonesToAdd: (string | undefined)[] = [
+    id,
+    targetIdLower,
+    targetUrlNorm,
+    targetNameClean,
+  ];
+
+  if (deletedRss) {
+    tombstonesToAdd.push(
+      deletedRss.id,
+      deletedRss.url,
+      normalizeMediaUrl(deletedRss.url),
+      deletedRss.name,
+      deletedRss.name.toLowerCase(),
+      cleanFeedOrMediaName(deletedRss.name)
+    );
+  }
+
+  for (const m of matchingMedia) {
+    tombstonesToAdd.push(
+      m.id,
+      m.file_url,
+      normalizeMediaUrl(m.file_url),
+      m.name,
+      m.name.toLowerCase(),
+      cleanFeedOrMediaName(m.name)
+    );
+  }
+
+  for (const t of tombstonesToAdd) {
     if (t && !data.deleted_media_ids.includes(t)) {
       data.deleted_media_ids.push(t);
     }
   }
 
-  // 3. Remove matching media items from data.media
-  const deletedMediaIds: string[] = [];
-  data.media = data.media.filter((m) => {
-    const isMatch = m.type === 'rss' && (
-      m.id === deletedRss.id ||
-      m.file_url === deletedRss.url ||
-      m.name.toLowerCase() === deletedRss.name.toLowerCase()
-    );
-    if (isMatch) {
-      deletedMediaIds.push(m.id);
-      if (!data.deleted_media_ids.includes(m.id)) data.deleted_media_ids.push(m.id);
-      return false;
-    }
-    return true;
-  });
+  // 4. Remove matching from data.rss_feeds
+  data.rss_feeds = data.rss_feeds.filter((r) => !isItemObjectDeleted(data, r));
 
-  // 4. Remove from all playlists
-  for (const pl of data.playlists) {
-    if (pl.items) {
-      pl.items = pl.items.filter(
-        (it) =>
-          it.media_id !== deletedRss.id &&
-          !deletedMediaIds.includes(it.media_id) &&
-          it.file_url !== deletedRss.url
-      );
-    }
-  }
+  // 5. Remove matching from data.media
+  data.media = data.media.filter((m) => !isItemObjectDeleted(data, m));
 
-  // 5. Clear integrity audit cache
+  // 6. Remove matching from all playlists
+  data.playlists = data.playlists.map((pl) => ({
+    ...pl,
+    items: (pl.items || []).filter((it) => !isItemObjectDeleted(data, it)),
+  }));
+
+  // 7. Clear integrity audit cache
   integrityReportsCache.delete(`company_${companyId}`);
   integrityReportsCache.delete('admin_global');
 
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
-  // 6. Broadcast deletion in real-time
+  // 8. Broadcast deletion in real-time
   try {
     realtimeHub.broadcastMediaChange(companyId, 'deleted', id);
     realtimeHub.sendRestartCommand({
       companyId,
-      reason: `Feed RSS "${deletedRss.name}" excluído`,
+      reason: `Feed RSS "${feedName}" excluído`,
     });
   } catch {}
 
@@ -3751,7 +3831,7 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
       itemsWithMedia = (playlist.items || [])
         .map((it) => {
           // Never return items that were explicitly deleted
-          const isDeleted = isMediaOrUrlDeleted(data, it.media_id) || (it.file_url && isMediaOrUrlDeleted(data, it.file_url));
+          const isDeleted = isItemObjectDeleted(data, it);
           if (isDeleted) return null;
 
           const m = data.media.find((media) => media.id === it.media_id);
@@ -3796,7 +3876,7 @@ apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
   }
 
   // Active RSS feeds
-  const rssFeeds = data.rss_feeds.filter((r) => r.company_id === player?.company_id && r.active);
+  const rssFeeds = data.rss_feeds.filter((r) => r.company_id === player?.company_id && r.active && !isItemObjectDeleted(data, r));
 
   res.json({
     player: {
@@ -5418,7 +5498,22 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     if (!id) return res.status(400).send('Media ID missing');
 
     const data = db.getData();
-    const media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)));
+    let media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)));
+    if (!media) {
+      for (const pl of data.playlists) {
+        const item = pl.items.find((it) => it.id === id || it.media_id === id);
+        if (item) {
+          media = data.media.find((m) => m.id === item.media_id) || ({
+            id: item.media_id || item.id,
+            name: item.name || 'Mídia',
+            type: item.type || 'video',
+            file_url: item.file_url,
+            local_url: (item as any).local_url,
+          } as any);
+          break;
+        }
+      }
+    }
     const rangeHeader = req.headers.range;
 
     // 1. Try local file in uploadsDir if present
@@ -5479,7 +5574,7 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     }
 
     // 2. Try Cloudflare R2 object
-    const targetKey = (media as any)?.r2_url || media?.file_url || id;
+    const targetKey = (media as any)?.r2_url || media?.file_url || (media as any)?.local_url || id;
     const r2Obj = await getObjectFromR2(targetKey, rangeHeader ? String(rangeHeader) : undefined);
     if (r2Obj && r2Obj.body) {
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -5488,6 +5583,24 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       if (r2Obj.contentLength) res.setHeader('Content-Length', r2Obj.contentLength);
       if (r2Obj.contentRange) res.setHeader('Content-Range', r2Obj.contentRange);
       res.status(r2Obj.status);
+
+      // Cache full file to uploadsDir in background for local playback & offline mode
+      if (localFilename) {
+        const destPath = path.join(uploadsDir, localFilename);
+        if (!fs.existsSync(destPath)) {
+          getObjectFromR2(targetKey).then(async (fullObj) => {
+            if (fullObj && fullObj.body) {
+              const outStream = fs.createWriteStream(destPath);
+              if (typeof (fullObj.body as any).pipe === 'function') {
+                (fullObj.body as any).pipe(outStream);
+              } else {
+                const { Readable } = await import('stream');
+                Readable.fromWeb(fullObj.body as any).pipe(outStream);
+              }
+            }
+          }).catch(() => {});
+        }
+      }
 
       if (typeof (r2Obj.body as any).pipe === 'function') {
         return (r2Obj.body as any).pipe(res);

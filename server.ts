@@ -6,6 +6,7 @@ import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/routes.js';
 import { db, uploadsDir } from './server/db.js';
 import { loadMediaBinaryFromFirestore } from './server/firestore.js';
+import { getObjectFromR2 } from './server/r2.js';
 
 async function startServer() {
   const app = express();
@@ -94,6 +95,47 @@ async function startServer() {
             return res.type(contentType).sendFile(localFilePath);
           }
         }
+      }
+
+      // 3. Try restoring from Cloudflare R2
+      try {
+        let r2Key = requestedFile;
+        const matched = data.media.find(
+          (m) =>
+            (m.local_url && m.local_url.endsWith(`/${requestedFile}`)) ||
+            (m.file_url && m.file_url.endsWith(`/${requestedFile}`)) ||
+            m.id === requestedFile ||
+            (m as any).unique_name === requestedFile
+        );
+        if (matched) {
+          r2Key = (matched as any).r2_url || matched.file_url || requestedFile;
+        }
+
+        const r2Obj = await getObjectFromR2(r2Key);
+        if (r2Obj && r2Obj.body) {
+          const fileWriteStream = fs.createWriteStream(localFilePath);
+          if (typeof (r2Obj.body as any).pipe === 'function') {
+            await new Promise<void>((resolve, reject) => {
+              (r2Obj.body as any).pipe(fileWriteStream);
+              fileWriteStream.on('finish', () => resolve());
+              fileWriteStream.on('error', reject);
+            });
+          } else {
+            const { Readable } = await import('stream');
+            const nodeStream = Readable.fromWeb(r2Obj.body as any);
+            await new Promise<void>((resolve, reject) => {
+              nodeStream.pipe(fileWriteStream);
+              fileWriteStream.on('finish', () => resolve());
+              fileWriteStream.on('error', reject);
+            });
+          }
+          if (fs.existsSync(localFilePath) && fs.statSync(localFilePath).size > 0) {
+            console.log(`[Media Recovery] Restored ${requestedFile} (${fs.statSync(localFilePath).size} bytes) from Cloudflare R2.`);
+            return res.type(contentType).sendFile(localFilePath);
+          }
+        }
+      } catch (r2Err) {
+        console.warn(`[Media Recovery] Warning restoring ${requestedFile} from R2:`, r2Err);
       }
     } catch (err) {
       console.warn('[Media Recovery] Warning while recovering upload:', err);

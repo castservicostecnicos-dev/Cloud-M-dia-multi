@@ -236,10 +236,68 @@ export const DEFAULT_RSS_FEEDS: RssPreset[] = [
   },
 ];
 
-export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier: string | undefined): boolean {
+export function normalizeMediaUrl(url?: string | null): string {
+  if (!url) return '';
+  try {
+    return String(url)
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .split('?')[0];
+  } catch {
+    return String(url || '').trim().toLowerCase();
+  }
+}
+
+export function cleanFeedOrMediaName(name?: string | null): string {
+  if (!name) return '';
+  return String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/^not[ií]cias\s*rss\s*[-–—:]\s*/i, '')
+    .replace(/^feed\s*rss\s*[-–—:]\s*/i, '')
+    .replace(/^rss\s*[-–—:]\s*/i, '')
+    .trim();
+}
+
+export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | null): boolean {
   if (!identifier || !data.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
-  const clean = identifier.trim().toLowerCase();
-  return data.deleted_media_ids.some((d) => d.trim().toLowerCase() === clean);
+  const rawId = String(identifier).trim().toLowerCase();
+  const normUrl = normalizeMediaUrl(identifier);
+  const cleanName = cleanFeedOrMediaName(identifier);
+
+  return data.deleted_media_ids.some((d) => {
+    if (!d) return false;
+    const rawD = String(d).trim().toLowerCase();
+    if (rawD === rawId) return true;
+
+    const normD = normalizeMediaUrl(d);
+    if (normUrl && normD && normUrl === normD) return true;
+
+    const cleanD = cleanFeedOrMediaName(d);
+    if (cleanName && cleanD && cleanName === cleanD) return true;
+
+    // Check basename if file path
+    const baseId = path.basename(rawId.split('?')[0]);
+    const baseD = path.basename(rawD.split('?')[0]);
+    if (baseId && baseD && baseId === baseD) return true;
+
+    return false;
+  });
+}
+
+export function isItemObjectDeleted(data: DatabaseSchema, item: any): boolean {
+  if (!item) return true;
+  if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
+  if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
+  if (item.url && isMediaOrUrlDeleted(data, item.url)) return true;
+  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
+  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
+  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
+  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
+  if (item.unique_code && isMediaOrUrlDeleted(data, item.unique_code)) return true;
+  return false;
 }
 
 export function ensureCompanyDefaultMedia(
@@ -644,15 +702,6 @@ class DatabaseStore {
           }
         }
 
-        // Ensure every company has Weather & Clock and RSS media items loaded
-        if (this.data.companies && this.data.media) {
-          const now = new Date().toISOString();
-          for (const comp of this.data.companies) {
-            if (ensureCompanyDefaultMedia(comp.id, this.data, now)) {
-              changed = true;
-            }
-          }
-        }
 
         // Clear any old predefined call phrases as requested
         if (this.data.call_phrases && this.data.call_phrases.length > 0) {
@@ -869,31 +918,9 @@ class DatabaseStore {
           new Set([...(cloudData.deleted_media_ids || []), ...(localData.deleted_media_ids || [])])
         );
 
-        // Helper to check if any media or item was deleted
-        const isDeletedItem = (item: any) => {
-          if (!item) return true;
-          const id = String(item.id || '').toLowerCase();
-          const fileUrl = String(item.file_url || '').toLowerCase();
-          const localUrl = String(item.local_url || '').toLowerCase();
-          const name = String(item.name || '').toLowerCase();
-          const driveId = String(item.drive_file_id || '').toLowerCase();
-          const uniqueCode = String(item.unique_code || '').toLowerCase();
-
-          return combinedDeletedIds.some((d) => {
-            const cd = String(d || '').trim().toLowerCase();
-            if (!cd) return false;
-            return (
-              cd === id ||
-              (fileUrl && cd === fileUrl) ||
-              (localUrl && cd === localUrl) ||
-              (name && cd === name) ||
-              (driveId && cd === driveId) ||
-              (uniqueCode && cd === uniqueCode) ||
-              (fileUrl && fileUrl.includes(cd)) ||
-              (localUrl && localUrl.includes(cd))
-            );
-          });
-        };
+        // Helper to check if any media or item was deleted using complete normalization
+        const tempStoreForDeleted = { deleted_media_ids: combinedDeletedIds } as DatabaseSchema;
+        const isDeletedItem = (item: any) => isItemObjectDeleted(tempStoreForDeleted, item);
 
         // Filter out any media items that were deleted
         const filteredCloudMedia = (cloudData.media || []).filter((m) => !isDeletedItem(m));
@@ -903,15 +930,7 @@ class DatabaseStore {
         const cleanPlaylistItems = (playlists: Playlist[] = []): Playlist[] => {
           return (playlists || []).map((pl) => ({
             ...pl,
-            items: (pl.items || []).filter((it) => {
-              if (combinedDeletedIds.some((d) => d.toLowerCase() === String(it.media_id || '').toLowerCase())) {
-                return false;
-              }
-              if (it.file_url && combinedDeletedIds.some((d) => d.toLowerCase() === it.file_url?.toLowerCase())) {
-                return false;
-              }
-              return true;
-            }),
+            items: (pl.items || []).filter((it) => !isDeletedItem(it)),
           }));
         };
 
