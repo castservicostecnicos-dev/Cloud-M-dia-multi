@@ -44,6 +44,9 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
   const [isPlaying, setIsPlaying] = useState(true);
   const getInitialMediaSrc = (m: Media): string => {
     if (m.type === 'video') {
+      if (m.file_url && m.file_url.startsWith('http') && !m.file_url.includes('drive.google.com')) {
+        return m.file_url;
+      }
       if (m.local_url && m.local_url.startsWith('/uploads/')) return m.local_url;
       if (m.id) return `/api/media/stream/${m.id}`;
       if (m.file_url && m.file_url.startsWith('/uploads/')) return m.file_url;

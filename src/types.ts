@@ -187,6 +187,7 @@ export interface Media {
   file_size?: number;
   mime_type?: string;
   local_url?: string;
+  r2_url?: string;
   created_at: string;
   updated_at: string;
 }

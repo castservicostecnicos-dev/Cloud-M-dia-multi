@@ -1023,7 +1023,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                 ref={videoRef}
                 key={currentMedia.id + currentIndex}
                 src={
-                  ((currentMedia as any)?.local_url && (currentMedia as any).local_url.startsWith('/uploads/'))
+                  (currentMedia.file_url && currentMedia.file_url.startsWith('http') && !currentMedia.file_url.includes('drive.google.com'))
+                    ? currentMedia.file_url
+                    : ((currentMedia as any)?.local_url && (currentMedia as any).local_url.startsWith('/uploads/'))
                     ? (currentMedia as any).local_url
                     : (currentMedia.media_id || currentMedia.id)
                     ? `/api/media/stream/${currentMedia.media_id || currentMedia.id}`

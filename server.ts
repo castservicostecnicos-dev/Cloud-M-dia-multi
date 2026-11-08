@@ -67,7 +67,19 @@ async function startServer() {
       }
 
       // 2. Try restoring from Google Drive if media has drive_file_id
-      const data = db.getData();
+      let data = db.getData();
+      let hasMatch = data.media.some(
+        (m) =>
+          (m.local_url && m.local_url.endsWith(`/${requestedFile}`)) ||
+          (m.file_url && m.file_url.endsWith(`/${requestedFile}`)) ||
+          m.id === requestedFile ||
+          (m as any).unique_name === requestedFile
+      );
+      if (!hasMatch) {
+        await db.syncFromFirestore(true);
+        data = db.getData();
+      }
+
       const matchedMedia = data.media.find(
         (m) => m.file_url?.endsWith(`/${requestedFile}`) && m.drive_file_id
       );
@@ -186,6 +198,13 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Periodic background synchronization across environments (e.g. ais-dev and ais-pre)
+  setInterval(() => {
+    db.syncFromFirestore().catch((err) => {
+      console.warn('[Sync] Periodic sync warning:', err?.message || err);
+    });
+  }, 15000);
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Indoor Media Server running on port ${PORT}`);

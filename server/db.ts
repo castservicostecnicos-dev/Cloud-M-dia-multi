@@ -182,6 +182,7 @@ export interface Media {
   file_size?: number;
   mime_type?: string;
   local_url?: string;
+  r2_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -999,6 +1000,82 @@ class DatabaseStore {
 
   public async syncToFirestoreNow(): Promise<boolean> {
     return await saveDatabaseToFirestoreNow(this.data);
+  }
+
+  private syncInProgress = false;
+  private lastSyncFromFirestoreTime = 0;
+
+  public async syncFromFirestore(force = false): Promise<boolean> {
+    const now = Date.now();
+    if (this.syncInProgress) return false;
+    if (!force && now - this.lastSyncFromFirestoreTime < 8000) {
+      return false;
+    }
+    this.syncInProgress = true;
+    this.lastSyncFromFirestoreTime = now;
+    try {
+      const res = await loadDatabaseFromFirestore();
+      if (res.status === 'found') {
+        const cloudData = res.data;
+        const localData = this.data;
+
+        const combinedDeletedIds = Array.from(
+          new Set([...(cloudData.deleted_media_ids || []), ...(localData.deleted_media_ids || [])])
+        );
+        const tempStoreForDeleted = { deleted_media_ids: combinedDeletedIds } as DatabaseSchema;
+        const isDeletedItem = (item: any) => isItemObjectDeleted(tempStoreForDeleted, item);
+
+        const filteredCloudMedia = (cloudData.media || []).filter((m) => !isDeletedItem(m));
+        const filteredLocalMedia = (localData.media || []).filter((m) => !isDeletedItem(m));
+
+        const cleanPlaylistItems = (playlists: Playlist[] = []): Playlist[] => {
+          return (playlists || []).map((pl) => ({
+            ...pl,
+            items: (pl.items || []).filter((it) => !isDeletedItem(it)),
+          }));
+        };
+
+        const sessionMap = new Map<string, AuthSession>();
+        for (const s of [...(cloudData.sessions || []), ...(localData.sessions || [])]) {
+          if (s && s.token) sessionMap.set(s.token, s);
+        }
+
+        this.data = {
+          ...this.data,
+          users: this.mergeById(cloudData.users, localData.users),
+          companies: this.mergeById(cloudData.companies, localData.companies),
+          company_stores: this.mergeById(cloudData.company_stores, localData.company_stores),
+          plans: this.mergeById(cloudData.plans, localData.plans),
+          players: this.mergeById(cloudData.players, localData.players),
+          operators: this.mergeById(cloudData.operators, localData.operators),
+          playlists: this.mergeById(cleanPlaylistItems(cloudData.playlists), cleanPlaylistItems(localData.playlists)).map((pl) => ({
+            ...pl,
+            active: pl.active !== false,
+          })),
+          media: this.mergeById(filteredCloudMedia, filteredLocalMedia).map((m) => ({
+            ...m,
+            active: m.active !== false,
+          })),
+          rss_feeds: this.mergeById(
+            (cloudData.rss_feeds || []).filter((r) => !isDeletedItem(r)),
+            (localData.rss_feeds || []).filter((r) => !isDeletedItem(r))
+          ),
+          sessions: Array.from(sessionMap.values()).slice(-200),
+          deleted_media_ids: combinedDeletedIds,
+        };
+
+        try {
+          fs.writeFileSync(dbPath, JSON.stringify(this.data, null, 2), 'utf-8');
+        } catch {}
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn('[DatabaseStore] syncFromFirestore warning:', err);
+      return false;
+    } finally {
+      this.syncInProgress = false;
+    }
   }
 
   public importBackup(newData: any): boolean {

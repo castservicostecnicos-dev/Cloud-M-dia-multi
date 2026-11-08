@@ -49,6 +49,7 @@ import {
   sanitizeR2AccountId,
   sanitizeR2BucketName,
 } from './r2.js';
+import { processAndOptimizeVideo, probeVideoMetadata } from './videoTranscode.js';
 import { R2Settings } from '../src/types';
 
 export const apiRouter = Router();
@@ -2196,7 +2197,7 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
 // Chunked File Upload from Device (bypasses Cloud Run / proxy 32MB request limits)
 apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { uploadId, chunkIndex, totalChunks, chunkData, filename, mimeType } = req.body;
+    let { uploadId, chunkIndex, totalChunks, chunkData, filename, mimeType } = req.body;
     if (!uploadId || chunkData === undefined || chunkIndex === undefined || !totalChunks) {
       return res.status(400).json({ error: 'Parâmetros de upload em partes incompletos.' });
     }
@@ -2230,8 +2231,8 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .slice(0, 40);
 
-    const uniqueName = `media-${safeUploadId}-${safeBaseName}.${detectedExt}`;
-    const filePath = path.join(uploadsDir, uniqueName);
+    let uniqueName = `media-${safeUploadId}-${safeBaseName}.${detectedExt}`;
+    let filePath = path.join(uploadsDir, uniqueName);
 
     const rawBase64 = typeof chunkData === 'string' && chunkData.includes(';base64,')
       ? chunkData.split(';base64,')[1]
@@ -2247,15 +2248,36 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
 
     const isLastChunk = Number(chunkIndex) >= Number(totalChunks) - 1;
     if (isLastChunk) {
-      const fullBuffer = fs.readFileSync(filePath);
-      saveMediaBinaryToFirestore(uniqueName, mimeType || 'application/octet-stream', fullBuffer).catch(() => {});
+      let fullBuffer = fs.readFileSync(filePath);
 
       const isVideo =
         detectedExt === 'mp4' ||
         detectedExt === 'webm' ||
         detectedExt === 'mov' ||
         detectedExt === 'ogv' ||
+        detectedExt === 'mkv' ||
+        detectedExt === 'avi' ||
+        detectedExt === 'm4v' ||
         (mimeType && mimeType.startsWith('video/'));
+
+      let videoDuration: number | undefined = undefined;
+
+      if (isVideo) {
+        try {
+          const processed = await processAndOptimizeVideo(filePath, uniqueName);
+          fullBuffer = Buffer.from(processed.buffer);
+          uniqueName = processed.filename;
+          filePath = processed.outputPath;
+          videoDuration = processed.duration;
+          detectedExt = 'mp4';
+          mimeType = 'video/mp4';
+          console.log(`[Chunk Upload] Video optimized successfully: ${uniqueName} (${fullBuffer.length} bytes, duration: ${videoDuration}s)`);
+        } catch (vidErr) {
+          console.warn('[Chunk Upload] Video optimization fallback:', vidErr);
+        }
+      }
+
+      saveMediaBinaryToFirestore(uniqueName, mimeType || (isVideo ? 'video/mp4' : 'application/octet-stream'), fullBuffer).catch(() => {});
 
       let finalUrl = `/uploads/${uniqueName}`;
       let r2Url: string | undefined = undefined;
@@ -2304,7 +2326,7 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
           const r2Res = await uploadToR2({
             buffer: fullBuffer,
             key: uniqueName,
-            contentType: mimeType || 'application/octet-stream',
+            contentType: mimeType || (isVideo ? 'video/mp4' : 'application/octet-stream'),
           });
           r2Url = r2Res.publicUrl;
           finalUrl = r2Res.publicUrl;
@@ -2323,6 +2345,7 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
         driveViewUrl,
         filename: uniqueName,
         size: fullBuffer.length,
+        duration: videoDuration,
       });
     }
 
@@ -2469,7 +2492,8 @@ apiRouter.post('/upload', requireAuth, async (req: AuthenticatedRequest, res) =>
 });
 
 // Media Management
-apiRouter.get('/company/media', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.get('/company/media', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
+  await db.syncFromFirestore().catch(() => {});
   const data = db.getData();
   const companyId = req.user!.role === 'admin'
     ? ((req.query.company_id as string) || (data.companies[0]?.id) || '')
@@ -3739,7 +3763,8 @@ apiRouter.post('/operator/call', requireAuth, (req: AuthenticatedRequest, res) =
 // ----------------------------------------------------
 // 5. PLAYER
 // ----------------------------------------------------
-apiRouter.get('/player/current', (req: AuthenticatedRequest, res) => {
+apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
+  await db.syncFromFirestore().catch(() => {});
   const playerCode = (req.query.code as string)?.trim();
   const playerToken = (req.query.token as string)?.trim();
   const authHeader = req.headers.authorization;
@@ -5497,20 +5522,25 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).send('Media ID missing');
 
-    const data = db.getData();
-    let media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)));
+    let data = db.getData();
+    let media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)) || (m as any).r2_url?.includes(id));
     if (!media) {
-      for (const pl of data.playlists) {
-        const item = pl.items.find((it) => it.id === id || it.media_id === id);
-        if (item) {
-          media = data.media.find((m) => m.id === item.media_id) || ({
-            id: item.media_id || item.id,
-            name: item.name || 'Mídia',
-            type: item.type || 'video',
-            file_url: item.file_url,
-            local_url: (item as any).local_url,
-          } as any);
-          break;
+      await db.syncFromFirestore(true).catch(() => {});
+      data = db.getData();
+      media = data.media.find((m) => m.id === id || m.file_url === id || (m.file_url && m.file_url.includes(id)) || (m as any).r2_url?.includes(id));
+      if (!media) {
+        for (const pl of data.playlists) {
+          const item = pl.items.find((it) => it.id === id || it.media_id === id);
+          if (item) {
+            media = data.media.find((m) => m.id === item.media_id) || ({
+              id: item.media_id || item.id,
+              name: item.name || 'Mídia',
+              type: item.type || 'video',
+              file_url: item.file_url,
+              local_url: (item as any).local_url,
+            } as any);
+            break;
+          }
         }
       }
     }
@@ -5545,7 +5575,7 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
             ? 'image/png'
             : ext === '.webp'
             ? 'image/webp'
-            : 'image/jpeg';
+            : (media?.type === 'video' ? 'video/mp4' : 'image/jpeg');
 
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Accept-Ranges', 'bytes');
@@ -5577,9 +5607,16 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     const targetKey = (media as any)?.r2_url || media?.file_url || (media as any)?.local_url || id;
     const r2Obj = await getObjectFromR2(targetKey, rangeHeader ? String(rangeHeader) : undefined);
     if (r2Obj && r2Obj.body) {
+      const keyOrName = ((media as any)?.unique_name || media?.name || targetKey || id || '').toLowerCase();
+      const isVideo = media?.type === 'video' || keyOrName.endsWith('.mp4') || keyOrName.endsWith('.webm') || keyOrName.endsWith('.avi') || keyOrName.endsWith('.mov');
+      let determinedContentType = r2Obj.contentType;
+      if (!determinedContentType || determinedContentType === 'application/octet-stream' || (isVideo && determinedContentType.startsWith('image/'))) {
+        determinedContentType = isVideo ? 'video/mp4' : 'image/jpeg';
+      }
+
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Accept-Ranges', 'bytes');
-      if (r2Obj.contentType) res.setHeader('Content-Type', r2Obj.contentType);
+      res.setHeader('Content-Type', determinedContentType);
       if (r2Obj.contentLength) res.setHeader('Content-Length', r2Obj.contentLength);
       if (r2Obj.contentRange) res.setHeader('Content-Range', r2Obj.contentRange);
       res.status(r2Obj.status);
@@ -5614,9 +5651,11 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     // 3. Fallback to Firestore binary chunk
     const chunkBuffer = await loadMediaBinaryFromFirestore(localFilename || id);
     if (chunkBuffer && chunkBuffer.length > 0) {
+      const keyOrName = ((media as any)?.unique_name || media?.name || localFilename || id || '').toLowerCase();
+      const isVid = media?.type === 'video' || keyOrName.endsWith('.mp4') || keyOrName.endsWith('.webm') || keyOrName.endsWith('.avi') || keyOrName.endsWith('.mov');
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Content-Type', media?.mime_type || (media?.type === 'video' ? 'video/mp4' : 'image/jpeg'));
+      res.setHeader('Content-Type', media?.mime_type || (isVid ? 'video/mp4' : 'image/jpeg'));
       return res.send(chunkBuffer);
     }
 
@@ -5828,7 +5867,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
     if (!companyId && req.user!.role === 'admin') {
       companyId = (req.query.company_id as string) || (req.headers['x-company-id'] as string) || data.companies[0]?.id || '';
     }
-    const {
+    let {
       fileData,
       uploadedFilename,
       filename,
@@ -5922,6 +5961,29 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       detectedExt === 'avi' ||
       detectedExt === 'm4v' ||
       (mimeType && mimeType.startsWith('video/'));
+
+    let processedDuration = Number(duration) || (isVideo ? 15 : 10);
+    if (isVideo) {
+      try {
+        const filePath = path.join(uploadsDir, uniqueLocalName);
+        const processed = await processAndOptimizeVideo(filePath, uniqueLocalName);
+        buffer = processed.buffer;
+        uniqueLocalName = processed.filename;
+        if (processed.duration && processed.duration > 0) {
+          processedDuration = Math.round(processed.duration);
+        }
+        detectedExt = 'mp4';
+        mimeType = 'video/mp4';
+        console.log(`[Media Upload] Video optimized for web streaming: ${uniqueLocalName} (${buffer.length} bytes, duration: ${processedDuration}s)`);
+      } catch (vidErr) {
+        console.warn('[Media Upload] Video optimization fallback:', vidErr);
+      }
+    }
+
+    // Re-save optimized binary to Firestore chunk store if video
+    if (isVideo) {
+      saveMediaBinaryToFirestore(uniqueLocalName, 'video/mp4', buffer).catch(() => {});
+    }
 
     const localUrl = `/uploads/${uniqueLocalName}`;
 
@@ -6029,17 +6091,18 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       name: (name || filename || 'Nova Mídia').trim(),
       type: isVideo ? 'video' : 'image',
       file_url: targetUrl,
-      duration: Number(duration) || (isVideo ? 15 : 10),
+      duration: processedDuration,
       active: true,
       drive_file_id: driveUploadInfo?.id,
       drive_view_url: driveUploadInfo?.webViewLink,
       drive_download_url: driveUploadInfo?.webContentLink,
       drive_folder_id: targetFolderId,
       unique_code: uniqueCode,
-      source: mediaSavedToDrive ? 'drive' : 'device',
+      source: mediaSavedToDrive ? 'drive' : (targetUrl.startsWith('http') ? 'url' : 'device'),
       file_size: buffer.length,
-      mime_type: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
+      mime_type: isVideo ? 'video/mp4' : (mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4')),
       local_url: localUrl,
+      r2_url: targetUrl.startsWith('http') ? targetUrl : undefined,
       created_at: now,
       updated_at: now,
     };

@@ -1690,6 +1690,10 @@ export async function handleClientFallbackRequest(
     // Check Cloudflare R2 direct client upload if R2 is configured and enabled
     let mediaSavedToR2 = false;
     let r2PublicUrl = '';
+    let fileBuffer: Uint8Array | null = null;
+    let detectedMime = mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
+    let safeExt = (filename || 'file.bin').split('.').pop() || (isVideo ? 'mp4' : 'jpg');
+    let r2Key = '';
     const r2 = dbData.r2_settings;
     if (
       !mediaSavedToDrive &&
@@ -1713,9 +1717,6 @@ export async function handleClientFallbackRequest(
           },
         });
 
-        let fileBuffer: Uint8Array | null = null;
-        let detectedMime = mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
-
         if (resolvedDataUrl.startsWith('data:')) {
           const parts = resolvedDataUrl.split(',');
           const mimeMatch = parts[0].match(/:(.*?);/);
@@ -1735,8 +1736,8 @@ export async function handleClientFallbackRequest(
         }
 
         if (fileBuffer) {
-          const safeExt = (filename || 'file.bin').split('.').pop() || (isVideo ? 'mp4' : 'jpg');
-          const r2Key = `media-${Date.now()}-${uniqueCode}.${safeExt}`;
+          safeExt = (filename || 'file.bin').split('.').pop() || (isVideo ? 'mp4' : 'jpg');
+          r2Key = `media-${Date.now()}-${uniqueCode}.${safeExt}`;
           await s3.send(
             new PutObjectCommand({
               Bucket: cleanBucket,
@@ -1797,7 +1798,13 @@ export async function handleClientFallbackRequest(
       drive_file_id: driveUploadInfo?.id,
       drive_view_url: driveUploadInfo?.webViewLink,
       drive_download_url: driveUploadInfo?.webContentLink,
+      r2_url: r2PublicUrl || (targetUrl.startsWith('http') ? targetUrl : undefined),
+      local_url: r2Key ? `/uploads/${r2Key}` : `/uploads/${newMediaId}.${safeExt || (isVideo ? 'mp4' : 'jpg')}`,
+      mime_type: isVideo ? 'video/mp4' : detectedMime,
+      file_size: fileBuffer?.byteLength || 0,
+      active: true,
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     dbData.media = [newMedia, ...(dbData.media || [])];
 
