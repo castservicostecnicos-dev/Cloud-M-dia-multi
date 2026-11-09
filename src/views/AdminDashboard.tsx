@@ -38,12 +38,20 @@ import {
   MapPin,
   GitBranch,
   Cloud,
+  BarChart3,
+  Clock,
+  Play,
+  FileCheck2,
+  Calendar,
+  Film,
+  Activity,
 } from 'lucide-react';
-import { api } from '../lib/api';
-import { Company, CompanyStore, Plan, AdminStats, MediaIntegrityAuditReport } from '../types';
+import { api, getStoredToken } from '../lib/api';
+import { Company, CompanyStore, Plan, AdminStats, MediaIntegrityAuditReport, ProofOfPlaySummary } from '../types';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { GoogleDriveFileManager } from '../components/GoogleDriveFileManager';
 import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
+import { CommercialProofOfPlayModal } from '../components/CommercialProofOfPlayModal';
 
 interface AdminDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -157,10 +165,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onOpenPresentation,
   onSeedDemoData,
 }) => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'companies' | 'plans' | 'drive'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'companies' | 'plans' | 'drive' | 'proof_of_play'>('dashboard');
   const [r2ModalOpen, setR2ModalOpen] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [selectedDemoClient, setSelectedDemoClient] = useState<'comp-1' | 'comp-2'>('comp-1');
+
+  // Estados da Prova de Exibição no Painel Admin
+  const [adminPopSummary, setAdminPopSummary] = useState<ProofOfPlaySummary | null>(null);
+  const [adminPopLoading, setAdminPopLoading] = useState(false);
+  const [adminPopCompanyId, setAdminPopCompanyId] = useState<string>('');
+  const [adminPopDays, setAdminPopDays] = useState<number | string>('all');
+  const [adminPopPlayerFilter, setAdminPopPlayerFilter] = useState<string>('all');
+  const [adminPopMediaFilter, setAdminPopMediaFilter] = useState<string>('all');
+  const [adminCommercialModalOpen, setAdminCommercialModalOpen] = useState(false);
+
   const [stats, setStats] = useState<AdminStats>({
     totalCompanies: 0,
     activeCompanies: 0,
@@ -382,7 +400,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         api.getFirestoreStatus().catch(() => null),
       ]);
       setStats(s);
-      setCompanies(Array.isArray(c) ? c : []);
+      const companyList = Array.isArray(c) ? c : [];
+      setCompanies(companyList);
+      if (companyList.length > 0 && !adminPopCompanyId) {
+        setAdminPopCompanyId(companyList[0].id);
+      }
       setPlans(Array.isArray(p) ? p : []);
       if (fsStatus) setFirestoreStatus(fsStatus);
     } catch (err: any) {
@@ -391,6 +413,80 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setLoading(false);
     }
   };
+
+  const loadAdminProofOfPlay = async () => {
+    if (!adminPopCompanyId && companies.length > 0) {
+      setAdminPopCompanyId(companies[0].id);
+    }
+    const targetCompId = adminPopCompanyId || (companies.length > 0 ? companies[0].id : undefined);
+    if (!targetCompId) return;
+
+    try {
+      setAdminPopLoading(true);
+      const res = await api.getProofOfPlaySummary({
+        companyId: targetCompId,
+        days: adminPopDays,
+        playerId: adminPopPlayerFilter !== 'all' ? adminPopPlayerFilter : undefined,
+        mediaId: adminPopMediaFilter !== 'all' ? adminPopMediaFilter : undefined,
+      });
+      if (res?.summary) {
+        setAdminPopSummary(res.summary);
+      }
+    } catch (err: any) {
+      console.warn('Erro ao carregar auditoria Proof of Play no admin:', err);
+    } finally {
+      setAdminPopLoading(false);
+    }
+  };
+
+  const handleAdminExportCsv = () => {
+    const targetCompId = adminPopCompanyId || (companies.length > 0 ? companies[0].id : '');
+    if (!targetCompId) {
+      showToast('error', 'Selecione uma empresa para exportar o relatório.');
+      return;
+    }
+    const params = new URLSearchParams();
+    params.append('company_id', targetCompId);
+    params.append('days', String(adminPopDays));
+    if (adminPopPlayerFilter !== 'all') {
+      params.append('playerId', adminPopPlayerFilter);
+    }
+    if (adminPopMediaFilter !== 'all') {
+      params.append('mediaId', adminPopMediaFilter);
+    }
+    const token = getStoredToken() || localStorage.getItem('indoor_media_token') || localStorage.getItem('token') || '';
+    fetch(`/api/company/proof-of-play/export-csv?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Falha ao exportar CSV');
+        return res.blob();
+      })
+      .then((blob) => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const targetComp = companies.find((c) => c.id === targetCompId);
+        const safeCompName = (targetComp?.trade_name || targetComp?.legal_name || 'empresa').toLowerCase().replace(/\s+/g, '-');
+        a.download = `auditoria-pop-${safeCompName}-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        showToast('success', 'Relatório CSV de Prova de Exibição exportado com sucesso!');
+      })
+      .catch((err) => {
+        showToast('error', err.message || 'Erro ao exportar relatório CSV');
+      });
+  };
+
+  useEffect(() => {
+    if (activeTab === 'proof_of_play') {
+      loadAdminProofOfPlay();
+    }
+  }, [activeTab, adminPopCompanyId, adminPopDays, adminPopPlayerFilter, adminPopMediaFilter]);
 
   const handleSyncFirestore = async () => {
     setIsSyncingFirestore(true);
@@ -960,6 +1056,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <UploadCloud className="h-3.5 w-3.5 text-blue-400 shrink-0" />
             <span className="truncate">Google Drive</span>
+          </button>
+          <button
+            id="tab-admin-pop"
+            onClick={() => setActiveTab('proof_of_play')}
+            className={`w-full lg:w-auto justify-center flex items-center gap-1.5 px-3.5 py-2 sm:py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition cursor-pointer text-center ${
+              activeTab === 'proof_of_play'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700'
+            }`}
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+            <span className="truncate">Prova de Exibição</span>
           </button>
 
           <button
@@ -2157,6 +2265,336 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           showToast={showToast}
         />
       )}
+
+      {/* VIEW: AUDITORIA & PROVA DE EXIBIÇÃO (PROOF OF PLAY) GLOBAL */}
+      {activeTab === 'proof_of_play' && (
+        <div className="space-y-6 animate-in fade-in duration-300">
+          {/* Top Bar with Company Selector, Filters and Export */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="h-5 w-5 text-emerald-400" />
+                <span>Auditoria & Prova de Exibição (Proof of Play)</span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Relatórios auditados de exibição para prestação de contas com anunciantes e patrocinadores.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Seletor de Empresa */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Building2 className="h-3.5 w-3.5 text-blue-400" />
+                <select
+                  value={adminPopCompanyId}
+                  onChange={(e) => {
+                    setAdminPopCompanyId(e.target.value);
+                    setAdminPopPlayerFilter('all');
+                    setAdminPopMediaFilter('all');
+                  }}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer max-w-[200px] truncate"
+                >
+                  {companies.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.trade_name || c.legal_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filtro de Período */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Calendar className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={adminPopDays}
+                  onChange={(e) => setAdminPopDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer"
+                >
+                  <option value="all">Todo o Histórico</option>
+                  <option value={1}>Últimas 24 horas</option>
+                  <option value={7}>Últimos 7 dias</option>
+                  <option value={15}>Últimos 15 dias</option>
+                  <option value={30}>Últimos 30 dias</option>
+                  <option value={90}>Últimos 90 dias</option>
+                </select>
+              </div>
+
+              {/* Filtro de Player */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Tv className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={adminPopPlayerFilter}
+                  onChange={(e) => setAdminPopPlayerFilter(e.target.value)}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer max-w-[150px] truncate"
+                >
+                  <option value="all">Todas as Telas</option>
+                  {Object.keys(adminPopSummary?.by_player || {}).map((pId) => (
+                    <option key={pId} value={pId}>
+                      Tela #{pId}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filtro por Mídia */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Film className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={adminPopMediaFilter}
+                  onChange={(e) => setAdminPopMediaFilter(e.target.value)}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer max-w-[180px] truncate"
+                >
+                  <option value="all">Todas as Mídias</option>
+                  {(adminPopSummary?.availableMedia || []).map((m: any) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Atualizar */}
+              <button
+                type="button"
+                onClick={loadAdminProofOfPlay}
+                disabled={adminPopLoading}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer"
+                title="Atualizar dados de exibição"
+              >
+                <RefreshCw className={`h-4 w-4 ${adminPopLoading ? 'animate-spin text-blue-400' : ''}`} />
+              </button>
+
+              {/* Certificado Oficial para Anunciante */}
+              <button
+                type="button"
+                onClick={() => setAdminCommercialModalOpen(true)}
+                className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow-xs cursor-pointer"
+                title="Gerar Certificado Oficial de Veiculação para Apresentação a Anunciantes"
+              >
+                <FileCheck2 className="h-3.5 w-3.5" />
+                <span>Certificado Comercial</span>
+              </button>
+
+              {/* Exportar CSV */}
+              <button
+                type="button"
+                onClick={handleAdminExportCsv}
+                className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-xs cursor-pointer"
+                title="Exportar registros analíticos CSV para anunciantes"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>Exportar CSV</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Cards de Métricas Principais (KPIs) */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Total de Exibições</span>
+                <div className="p-2 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  <Play className="h-4 w-4 fill-current" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-white font-mono">
+                {adminPopLoading ? '...' : (adminPopSummary?.totalPlays ?? 0).toLocaleString('pt-BR')}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Impactos veiculados no período</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tempo no Ar</span>
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <Clock className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-emerald-400 font-mono">
+                {adminPopLoading
+                  ? '...'
+                  : `${Math.round((adminPopSummary?.totalDurationSeconds ?? 0) / 60)} min`}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                {((adminPopSummary?.totalDurationSeconds ?? 0) / 3600).toFixed(1)} horas de exibição
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Telas Auditadas</span>
+                <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                  <Tv className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-indigo-400 font-mono">
+                {adminPopLoading ? '...' : (adminPopSummary?.uniquePlayers ?? 0)}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Terminais que transmitiram mídias</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xs relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Mídias Auditadas</span>
+                <div className="p-2 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                  <Film className="h-4 w-4" />
+                </div>
+              </div>
+              <p className="text-2xl font-extrabold text-purple-400 font-mono">
+                {adminPopLoading ? '...' : (adminPopSummary?.uniqueMedia ?? 0)}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">Campanhas distintas veiculadas</p>
+            </div>
+          </div>
+
+          {/* Gráfico / Ranking das Top Mídias & Tabela de Registros Recentes */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Top Mídias Mais Exibidas */}
+            <div className="lg:col-span-1 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-blue-400" />
+                  <span>Mídias Mais Exibidas</span>
+                </h3>
+                <span className="text-[11px] font-semibold text-slate-400">
+                  Top {(adminPopSummary?.topMedia || []).length}
+                </span>
+              </div>
+
+              {(!adminPopSummary?.topMedia || adminPopSummary.topMedia.length === 0) ? (
+                <div className="p-6 text-center text-slate-500 text-xs">
+                  Nenhuma mídia registrada no período selecionado.
+                </div>
+              ) : (
+                <div className="space-y-3.5 max-h-[460px] overflow-y-auto pr-1">
+                  {adminPopSummary.topMedia.slice(0, 10).map((tm, idx) => {
+                    const maxCount = adminPopSummary.topMedia[0]?.playCount || 1;
+                    const percent = Math.min(100, Math.round((tm.playCount / maxCount) * 100));
+                    return (
+                      <div key={tm.media_id || idx} className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
+                            <span className="font-mono text-slate-500 font-bold text-[10px]">#{idx + 1}</span>
+                            <span className="font-semibold text-white truncate text-xs" title={tm.media_name}>
+                              {tm.media_name}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="font-mono font-bold text-blue-400 text-xs">{tm.playCount}x</span>
+                            <span className="text-slate-500 text-[10px] ml-1">({Math.round(tm.totalSeconds / 60)}m)</span>
+                          </div>
+                        </div>
+                        <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full"
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Tabela de Logs Recentes de Auditoria */}
+            <div className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="font-bold text-white text-sm flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-emerald-400" />
+                  <span>Últimos Registros de Reprodução (Auditoria)</span>
+                </h3>
+                <span className="text-[11px] font-semibold text-slate-400">
+                  {adminPopSummary?.recentLogs?.length || 0} eventos
+                </span>
+              </div>
+
+              {(!adminPopSummary?.recentLogs || adminPopSummary.recentLogs.length === 0) ? (
+                <div className="p-12 text-center space-y-2">
+                  <ShieldAlert className="h-8 w-8 text-slate-600 mx-auto" />
+                  <p className="text-sm font-bold text-slate-300">Nenhum evento registrado ainda</p>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Assim que as TVs reproduzirem a grade, cada exibição com data, horário e duração aparecerá aqui.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase">
+                        <th className="pb-2.5 font-bold">Data & Hora</th>
+                        <th className="pb-2.5 font-bold">Mídia</th>
+                        <th className="pb-2.5 font-bold">TV / Player</th>
+                        <th className="pb-2.5 font-bold">Duração</th>
+                        <th className="pb-2.5 font-bold text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {adminPopSummary.recentLogs
+                        .filter((log, idx, arr) => arr.findIndex((l) => l.id === log.id) === idx)
+                        .slice(0, 50)
+                        .map((log, idx) => {
+                          const dateFormatted = new Date(log.played_at).toLocaleString('pt-BR');
+                          const rowKey = log.id ? `${log.id}-${idx}` : `log-${idx}`;
+                          return (
+                            <tr key={rowKey} className="hover:bg-slate-800/40 transition">
+                              <td className="py-2.5 font-mono text-[11px] text-slate-300">
+                                {dateFormatted}
+                              </td>
+                              <td className="py-2.5">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                    log.media_type === 'video'
+                                      ? 'bg-purple-950 text-purple-300 border border-purple-800'
+                                      : log.media_type === 'rss'
+                                      ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                                      : 'bg-blue-950 text-blue-300 border border-blue-800'
+                                  }`}>
+                                    {log.media_type || 'IMG'}
+                                  </span>
+                                  <span className="font-semibold text-white truncate max-w-[160px]" title={log.media_name}>
+                                    {log.media_name}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-2.5 text-slate-300 font-medium">
+                                {log.player_name || log.player_id}
+                              </td>
+                              <td className="py-2.5 font-mono text-slate-300">
+                                {log.duration_seconds}s
+                              </td>
+                              <td className="py-2.5 text-right">
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded-full">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  <span>Verificado</span>
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CERTIFICADO COMERCIAL DE PROVA DE EXIBIÇÃO NO ADMIN */}
+      <CommercialProofOfPlayModal
+        isOpen={adminCommercialModalOpen}
+        onClose={() => setAdminCommercialModalOpen(false)}
+        summary={adminPopSummary}
+        companyName={companies.find((c) => c.id === adminPopCompanyId)?.trade_name || 'Mídia Indoor'}
+        selectedMediaName={
+          adminPopMediaFilter !== 'all'
+            ? (adminPopSummary?.availableMedia || []).find((m: any) => m.id === adminPopMediaFilter)?.name || adminPopMediaFilter
+            : undefined
+        }
+        daysFilter={adminPopDays}
+        onExportCsv={handleAdminExportCsv}
+      />
 
       {/* MODAL EMPRESA - Otimizado para dispositivos móveis (Bottom-sheet) e desktop */}
       {companyModalOpen && (

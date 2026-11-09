@@ -525,17 +525,20 @@ export const api = {
     media_id: string;
     playlist_id?: string;
     duration_seconds: number;
+    media_name?: string;
+    media_type?: string;
   }) =>
     request<{ status: string; logId: string }>('/player/proof-of-play', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
 
-  getProofOfPlaySummary: (params?: { playerId?: string; mediaId?: string; days?: number }) => {
+  getProofOfPlaySummary: (params?: { playerId?: string; mediaId?: string; days?: number | string; companyId?: string }) => {
     const query = new URLSearchParams();
+    if (params?.companyId) query.append('company_id', params.companyId);
     if (params?.playerId) query.append('playerId', params.playerId);
     if (params?.mediaId) query.append('mediaId', params.mediaId);
-    if (params?.days) query.append('days', String(params.days));
+    if (params?.days !== undefined) query.append('days', String(params.days));
     const qs = query.toString();
     return request<{ summary: ProofOfPlaySummary; logsCount: number }>(
       `/company/proof-of-play${qs ? `?${qs}` : ''}`

@@ -768,13 +768,34 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
 
   // Sugestão 6: Envio de Prova de Exibição (Proof of Play)
   const sendProofOfPlay = (item: any, durationSec: number) => {
-    if (!data?.player?.id || !item?.media_id) return;
+    const targetPlayerId = data?.player?.id || data?.player?.code || overridePlayerCode;
+    const targetMediaId = item?.media_id || item?.id;
+    if (!targetPlayerId || !targetMediaId) return;
+
     api.recordProofOfPlay({
-      player_id: data.player.id,
-      media_id: item.media_id,
-      playlist_id: data.playlist?.id,
+      player_id: targetPlayerId,
+      media_id: targetMediaId,
+      playlist_id: data?.playlist?.id,
       duration_seconds: durationSec,
-    }).catch(() => {});
+      media_name: item?.name || 'Mídia',
+      media_type: item?.type || 'image',
+    }).catch(() => {
+      // Salva em fila offline local caso conexão falhe
+      try {
+        const queueKey = 'indoor_offline_pop_queue';
+        const existing = JSON.parse(localStorage.getItem(queueKey) || '[]');
+        existing.push({
+          player_id: targetPlayerId,
+          media_id: targetMediaId,
+          playlist_id: data?.playlist?.id,
+          duration_seconds: durationSec,
+          media_name: item?.name,
+          media_type: item?.type,
+          timestamp: new Date().toISOString(),
+        });
+        localStorage.setItem(queueKey, JSON.stringify(existing.slice(-200)));
+      } catch {}
+    });
   };
 
   // Mídias ativas filtradas pelo agendamento inteligente

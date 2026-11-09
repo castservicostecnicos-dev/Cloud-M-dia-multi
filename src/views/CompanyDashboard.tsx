@@ -59,9 +59,11 @@ import {
   Info,
   Cloud,
   CheckSquare,
+  FileCheck2,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, getStoredToken } from '../lib/api';
 import { CompanyStats, CompanyStore, Player, Operator, Playlist, Media, RssFeed, Company, MediaIntegrityAuditReport, MediaIntegrityItemResult, TransitionEffect, ProofOfPlaySummary, ProofOfPlayLog, PlaylistItem } from '../types';
+import { CommercialProofOfPlayModal } from '../components/CommercialProofOfPlayModal';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { MediaThumbnail } from '../components/MediaThumbnail';
 import { MediaPreviewModal } from '../components/MediaPreviewModal';
@@ -463,8 +465,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   // Estados da Prova de Exibição (Proof of Play)
   const [proofOfPlaySummary, setProofOfPlaySummary] = useState<ProofOfPlaySummary | null>(null);
   const [proofOfPlayLoading, setProofOfPlayLoading] = useState(false);
-  const [proofOfPlayDays, setProofOfPlayDays] = useState<number>(7);
+  const [proofOfPlayDays, setProofOfPlayDays] = useState<number | string>('all');
   const [proofOfPlayPlayerFilter, setProofOfPlayPlayerFilter] = useState<string>('all');
+  const [proofOfPlayMediaFilter, setProofOfPlayMediaFilter] = useState<string>('all');
+  const [commercialProofModalOpen, setCommercialProofModalOpen] = useState(false);
 
   const loadProofOfPlay = async () => {
     try {
@@ -472,6 +476,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       const res = await api.getProofOfPlaySummary({
         days: proofOfPlayDays,
         playerId: proofOfPlayPlayerFilter !== 'all' ? proofOfPlayPlayerFilter : undefined,
+        mediaId: proofOfPlayMediaFilter !== 'all' ? proofOfPlayMediaFilter : undefined,
       });
       if (res?.summary) {
         setProofOfPlaySummary(res.summary);
@@ -489,7 +494,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     if (proofOfPlayPlayerFilter !== 'all') {
       params.append('playerId', proofOfPlayPlayerFilter);
     }
-    const token = localStorage.getItem('token') || '';
+    if (proofOfPlayMediaFilter !== 'all') {
+      params.append('mediaId', proofOfPlayMediaFilter);
+    }
+    const token = getStoredToken() || localStorage.getItem('indoor_media_token') || localStorage.getItem('token') || '';
     fetch(`/api/company/proof-of-play/export-csv?${params.toString()}`, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -533,7 +541,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     if (activeTab === 'proof_of_play') {
       loadProofOfPlay();
     }
-  }, [activeTab, proofOfPlayDays, proofOfPlayPlayerFilter]);
+  }, [activeTab, proofOfPlayDays, proofOfPlayPlayerFilter, proofOfPlayMediaFilter]);
 
   // Media Picker modal states for Playlist
   const [mediaPickerModalOpen, setMediaPickerModalOpen] = useState(false);
@@ -4295,13 +4303,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <Calendar className="h-3.5 w-3.5 text-slate-400" />
                 <select
                   value={proofOfPlayDays}
-                  onChange={(e) => setProofOfPlayDays(Number(e.target.value))}
+                  onChange={(e) => setProofOfPlayDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
                   className="bg-transparent text-white font-medium focus:outline-none cursor-pointer"
                 >
+                  <option value="all">Todo o Histórico</option>
                   <option value={1}>Últimas 24 horas</option>
                   <option value={7}>Últimos 7 dias</option>
                   <option value={15}>Últimos 15 dias</option>
                   <option value={30}>Últimos 30 dias</option>
+                  <option value={90}>Últimos 90 dias</option>
                 </select>
               </div>
 
@@ -4322,6 +4332,23 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 </select>
               </div>
 
+              {/* Filtro por Mídia / Campanha */}
+              <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs">
+                <Film className="h-3.5 w-3.5 text-slate-400" />
+                <select
+                  value={proofOfPlayMediaFilter}
+                  onChange={(e) => setProofOfPlayMediaFilter(e.target.value)}
+                  className="bg-transparent text-white font-medium focus:outline-none cursor-pointer max-w-[170px] truncate"
+                >
+                  <option value="all">Todas as Mídias</option>
+                  {(proofOfPlaySummary?.availableMedia || mediaList || []).map((m: any) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Atualizar */}
               <button
                 type="button"
@@ -4333,6 +4360,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <RefreshCw className={`h-4 w-4 ${proofOfPlayLoading ? 'animate-spin text-blue-400' : ''}`} />
               </button>
 
+              {/* Certificado Oficial para Anunciante */}
+              <button
+                type="button"
+                onClick={() => setCommercialProofModalOpen(true)}
+                className="min-h-[36px] flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition shadow-xs cursor-pointer"
+                title="Abrir Certificado Oficial de Veiculação para Apresentação Comercial"
+              >
+                <FileCheck2 className="h-3.5 w-3.5" />
+                <span>Certificado Comercial</span>
+              </button>
+
               {/* Exportar CSV */}
               <button
                 type="button"
@@ -4341,7 +4379,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 title="Exportar registros detalhados em planilha CSV para anunciantes"
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>Exportar Relatório CSV</span>
+                <span>Exportar CSV</span>
               </button>
             </div>
           </div>
@@ -4534,6 +4572,21 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL CERTIFICADO COMERCIAL DE PROVA DE EXIBIÇÃO */}
+      <CommercialProofOfPlayModal
+        isOpen={commercialProofModalOpen}
+        onClose={() => setCommercialProofModalOpen(false)}
+        summary={proofOfPlaySummary}
+        companyName={companyInfo?.name || (stats?.company as any)?.trade_name || (stats?.company as any)?.legal_name || 'Mídia Indoor'}
+        selectedMediaName={
+          proofOfPlayMediaFilter !== 'all'
+            ? (proofOfPlaySummary?.availableMedia || mediaList || []).find((m: any) => m.id === proofOfPlayMediaFilter)?.name || proofOfPlayMediaFilter
+            : undefined
+        }
+        daysFilter={proofOfPlayDays}
+        onExportCsv={handleExportProofOfPlayCsv}
+      />
 
       {/* MODAL PLAYER */}
       {playerModalOpen && (

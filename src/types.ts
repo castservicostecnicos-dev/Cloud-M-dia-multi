@@ -424,5 +424,6 @@ export interface ProofOfPlaySummary {
     totalSeconds: number;
   }[];
   recentLogs: ProofOfPlayLog[];
+  availableMedia?: { id: string; name: string }[];
 }
 

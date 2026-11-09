@@ -679,6 +679,94 @@ export async function handleClientFallbackRequest(
   if (pathOnly === '/company/media/integrity-status' && method === 'GET') {
     return null;
   }
+  if (pathOnly === '/company/proof-of-play' && method === 'GET') {
+    const urlObj = new URL(endpoint, 'http://localhost');
+    const compId = urlObj.searchParams.get('company_id') || activeCompanyId;
+    const playerId = urlObj.searchParams.get('playerId');
+    const mediaId = urlObj.searchParams.get('mediaId');
+    const daysStr = urlObj.searchParams.get('days');
+    const daysNum = Number(daysStr);
+    const isAllTime = !daysStr || daysStr === 'all' || daysNum >= 365;
+
+    const allLogs = (dbData.proof_of_play_logs || []).filter((l: any) => !compId || l.company_id === compId);
+    let filtered = allLogs;
+    if (!isAllTime && daysNum > 0) {
+      const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+      filtered = filtered.filter((l: any) => l.played_at >= cutoff);
+    }
+    if (playerId && playerId !== 'all') {
+      filtered = filtered.filter((l: any) => l.player_id === playerId);
+    }
+    if (mediaId && mediaId !== 'all') {
+      filtered = filtered.filter((l: any) => l.media_id === mediaId || l.media_name === mediaId);
+    }
+
+    const seenIds = new Set<string>();
+    const uniqueFiltered: any[] = [];
+    for (const log of filtered) {
+      if (log?.id && !seenIds.has(log.id)) {
+        seenIds.add(log.id);
+        uniqueFiltered.push(log);
+      }
+    }
+
+    const mediaMap = new Map<string, any>();
+    for (const log of uniqueFiltered) {
+      const ex = mediaMap.get(log.media_id);
+      if (ex) {
+        ex.playCount += 1;
+        ex.totalSeconds += log.duration_seconds;
+      } else {
+        mediaMap.set(log.media_id, {
+          media_id: log.media_id,
+          media_name: log.media_name || 'Mídia',
+          media_type: log.media_type,
+          playCount: 1,
+          totalSeconds: log.duration_seconds,
+        });
+      }
+    }
+
+    const topMedia = Array.from(mediaMap.values()).sort((a: any, b: any) => b.playCount - a.playCount);
+    const availableMedia = Array.from(
+      new Map(allLogs.map((l: any) => [l.media_id, { id: l.media_id, name: l.media_name || 'Mídia' }])).values()
+    );
+
+    return {
+      summary: {
+        totalPlays: uniqueFiltered.length,
+        totalDurationSeconds: uniqueFiltered.reduce((acc: number, l: any) => acc + (l.duration_seconds || 0), 0),
+        uniquePlayers: new Set(uniqueFiltered.map((l: any) => l.player_id)).size,
+        uniqueMedia: new Set(uniqueFiltered.map((l: any) => l.media_id)).size,
+        topMedia,
+        recentLogs: uniqueFiltered.slice(-100).reverse(),
+        availableMedia,
+      },
+      logsCount: uniqueFiltered.length,
+    };
+  }
+
+  if (pathOnly === '/player/proof-of-play' && method === 'POST') {
+    const { player_id, media_id, playlist_id, duration_seconds, media_name, media_type } = body || {};
+    const player = (dbData.players || []).find((p: any) => p.id === player_id || p.code === player_id || p.pairing_code === player_id);
+    const media = (dbData.media || []).find((m: any) => m.id === media_id);
+    const newLog = {
+      id: `pop-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      company_id: player?.company_id || activeCompanyId,
+      player_id: player?.id || player_id,
+      player_name: player?.name || 'TV',
+      store_id: player?.store_id || null,
+      media_id,
+      media_name: media?.name || media_name || 'Mídia',
+      media_type: media?.type || media_type || 'image',
+      playlist_id: playlist_id || player?.playlist_id,
+      duration_seconds: Math.max(1, Number(duration_seconds) || 10),
+      played_at: new Date().toISOString(),
+    };
+    dbData.proof_of_play_logs = [newLog, ...(dbData.proof_of_play_logs || [])].slice(0, 5000);
+    await saveCloudDb(dbData);
+    return { status: 'ok', logId: newLog.id };
+  }
 
   // 6. WRITE / MUTATION ENDPOINTS IN FALLBACK MODE
   if (pathOnly === '/admin/companies' && method === 'POST') {

@@ -1061,6 +1061,7 @@ class DatabaseStore {
             (localData.rss_feeds || []).filter((r) => !isDeletedItem(r))
           ),
           sessions: Array.from(sessionMap.values()).slice(-200),
+          proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs || [], localData.proof_of_play_logs || []).slice(-5000),
           deleted_media_ids: combinedDeletedIds,
         };
 

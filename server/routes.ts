@@ -3954,7 +3954,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
 
 // 1. Registro de exibição enviado pelo Player
 apiRouter.post('/player/proof-of-play', (req, res) => {
-  const { player_id, media_id, playlist_id, duration_seconds } = req.body;
+  const { player_id, media_id, playlist_id, duration_seconds, media_name, media_type } = req.body;
   if (!player_id || !media_id) {
     return res.status(400).json({ error: 'player_id e media_id são obrigatórios.' });
   }
@@ -3964,6 +3964,7 @@ apiRouter.post('/player/proof-of-play', (req, res) => {
     (p) =>
       p.id === player_id ||
       p.code === player_id ||
+      (p as any).pairing_code === player_id ||
       p.access_token === player_id
   );
 
@@ -3971,7 +3972,21 @@ apiRouter.post('/player/proof-of-play', (req, res) => {
     return res.status(404).json({ error: 'Player não encontrado.' });
   }
 
-  const media = data.media.find((m) => m.id === media_id);
+  let media = data.media.find((m) => m.id === media_id || m.file_url === media_id);
+  if (!media) {
+    for (const pl of data.playlists) {
+      const it = pl.items?.find((i) => i.id === media_id || i.media_id === media_id);
+      if (it) {
+        media = data.media.find((m) => m.id === it.media_id) || ({
+          name: it.name,
+          type: it.type,
+          file_url: it.file_url,
+        } as any);
+        break;
+      }
+    }
+  }
+
   const now = new Date().toISOString();
 
   if (!data.proof_of_play_logs) {
@@ -3985,8 +4000,8 @@ apiRouter.post('/player/proof-of-play', (req, res) => {
     player_name: player.name,
     store_id: player.store_id || null,
     media_id,
-    media_name: media?.name || 'Mídia',
-    media_type: media?.type || 'image',
+    media_name: media?.name || media_name || 'Mídia',
+    media_type: media?.type || media_type || 'image',
     playlist_id: playlist_id || player.playlist_id || undefined,
     duration_seconds: Math.max(1, Number(duration_seconds) || 10),
     played_at: now,
@@ -4003,22 +4018,31 @@ apiRouter.post('/player/proof-of-play', (req, res) => {
   res.status(201).json({ status: 'ok', logId: newLog.id });
 });
 
-// 2. Consulta de logs e sumário para o Dashboard da Empresa
-apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+// 2. Consulta de logs e sumário para o Dashboard da Empresa e Administração
+apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
+  await db.syncFromFirestore().catch(() => {});
   const data = db.getData();
-  const allLogs = (data.proof_of_play_logs || []).filter((l) => l.company_id === companyId);
+  const companyId = req.user!.role === 'admin'
+    ? ((req.query.company_id as string) || (req.query.companyId as string) || req.user?.company_id || data.companies[0]?.id || '')
+    : req.user!.company_id!;
+
+  const allLogs = (data.proof_of_play_logs || []).filter((l) => !companyId || l.company_id === companyId);
 
   const { playerId, mediaId, days } = req.query;
-  const daysNum = Math.max(1, Number(days) || 7);
-  const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+  const daysNum = Number(days);
+  const isAllTime = !days || days === 'all' || daysNum >= 365;
 
-  let filtered = allLogs.filter((l) => l.played_at >= cutoff);
-  if (playerId) {
+  let filtered = allLogs;
+  if (!isAllTime && daysNum > 0) {
+    const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+    filtered = filtered.filter((l) => l.played_at >= cutoff);
+  }
+
+  if (playerId && playerId !== 'all') {
     filtered = filtered.filter((l) => l.player_id === playerId);
   }
-  if (mediaId) {
-    filtered = filtered.filter((l) => l.media_id === mediaId);
+  if (mediaId && mediaId !== 'all') {
+    filtered = filtered.filter((l) => l.media_id === mediaId || l.media_name === mediaId);
   }
 
   // Deduplicar logs por id para garantir unicidade e consistência estrita
@@ -4055,6 +4079,11 @@ apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (re
   const uniquePlayers = new Set(uniqueFiltered.map((l) => l.player_id)).size;
   const uniqueMedia = new Set(uniqueFiltered.map((l) => l.media_id)).size;
 
+  // Lista de mídias únicas para o filtro
+  const availableMedia = Array.from(
+    new Map(allLogs.map((l) => [l.media_id, { id: l.media_id, name: l.media_name || 'Mídia' }])).values()
+  );
+
   res.json({
     summary: {
       totalPlays,
@@ -4063,26 +4092,41 @@ apiRouter.get('/company/proof-of-play', requireAuth, requireRole('company'), (re
       uniqueMedia,
       topMedia,
       recentLogs: uniqueFiltered.slice(-100).reverse(),
+      availableMedia,
     },
     logsCount: uniqueFiltered.length,
   });
 });
 
 // 3. Exportação de Relatório de Prova de Exibição em CSV
-apiRouter.get('/company/proof-of-play/export-csv', requireAuth, requireRole('company'), (req: AuthenticatedRequest, res) => {
-  const companyId = req.user!.company_id!;
+apiRouter.get('/company/proof-of-play/export-csv', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
   const data = db.getData();
-  const allLogs = (data.proof_of_play_logs || []).filter((l) => l.company_id === companyId);
+  const companyId = req.user!.role === 'admin'
+    ? ((req.query.company_id as string) || (req.query.companyId as string) || req.user?.company_id || data.companies[0]?.id || '')
+    : req.user!.company_id!;
+
+  const allLogs = (data.proof_of_play_logs || []).filter((l) => !companyId || l.company_id === companyId);
+  const company = data.companies.find((c) => c.id === companyId);
+  const companyName = company?.trade_name || company?.legal_name || 'Empresa';
 
   const { playerId, mediaId, days } = req.query;
-  const daysNum = Math.max(1, Number(days) || 30);
-  const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+  const daysNum = Number(days);
+  const isAllTime = !days || days === 'all' || daysNum >= 365;
 
-  let filtered = allLogs.filter((l) => l.played_at >= cutoff);
-  if (playerId) filtered = filtered.filter((l) => l.player_id === playerId);
-  if (mediaId) filtered = filtered.filter((l) => l.media_id === mediaId);
+  let filtered = allLogs;
+  if (!isAllTime && daysNum > 0) {
+    const cutoff = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000).toISOString();
+    filtered = filtered.filter((l) => l.played_at >= cutoff);
+  }
+
+  if (playerId && playerId !== 'all') filtered = filtered.filter((l) => l.player_id === playerId);
+  if (mediaId && mediaId !== 'all') filtered = filtered.filter((l) => l.media_id === mediaId || l.media_name === mediaId);
 
   const rows = [
+    `# RELATÓRIO DE AUDITORIA E PROVA DE EXIBIÇÃO COMERCIAL - ${companyName.toUpperCase()}`,
+    `# Gerado em: ${new Date().toLocaleString('pt-BR')}`,
+    `# Total de Inserções Auditadas: ${filtered.length}`,
+    '',
     ['Data/Hora (ISO)', 'Data Local', 'Player ID', 'Nome do Player', 'Mídia ID', 'Nome da Mídia', 'Tipo', 'Duração (s)'].join(';')
   ];
 
