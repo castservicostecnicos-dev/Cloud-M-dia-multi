@@ -173,27 +173,45 @@ export async function uploadToR2(params: {
   };
 }
 
+export function extractR2Key(keyOrUrl: string | undefined): string | null {
+  if (!keyOrUrl) return null;
+  let key = String(keyOrUrl).trim();
+
+  // If it's a URL
+  if (key.includes('://')) {
+    try {
+      const parsed = new URL(key);
+      key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+    } catch {
+      key = key.split('?')[0].split('/').pop() || key;
+    }
+  } else {
+    // Strip leading slashes, api prefixes, or uploads/ prefix
+    key = key.split('?')[0];
+    key = key.replace(/^\/+/, '');
+    key = key.replace(/^api\/media\/stream\/+/, '');
+    key = key.replace(/^uploads\/+/, '');
+  }
+
+  // Remove trailing slashes
+  key = key.replace(/\/+$/, '').trim();
+
+  // Non-R2 targets
+  if (!key || key.startsWith('widget:') || key.startsWith('data:') || key.startsWith('idb:') || key.startsWith('blob:')) {
+    return null;
+  }
+
+  return key;
+}
+
 export async function deleteFromR2(keyOrUrl: string): Promise<boolean> {
   try {
     const config = getEffectiveR2Config();
     if (!isR2Configured(config)) return false;
     if (!keyOrUrl) return false;
 
-    let key = keyOrUrl.trim();
-    if (key.includes('://')) {
-      try {
-        const parsed = new URL(key);
-        key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
-      } catch {
-        key = key.split('/').pop() || key;
-      }
-    } else {
-      key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
-    }
-
-    if (!key || key.startsWith('widget:') || key.startsWith('data:') || key.startsWith('idb:')) {
-      return false;
-    }
+    const key = extractR2Key(keyOrUrl);
+    if (!key) return false;
 
     const client = createR2Client(config);
     const command = new DeleteObjectCommand({
@@ -207,6 +225,95 @@ export async function deleteFromR2(keyOrUrl: string): Promise<boolean> {
     console.warn('[Cloudflare R2] Falha ao deletar objeto:', keyOrUrl, err?.message || err);
     return false;
   }
+}
+
+export async function listR2Objects(maxKeys = 1000): Promise<Array<{ key: string; size: number; lastModified?: Date }>> {
+  try {
+    const config = getEffectiveR2Config();
+    if (!isR2Configured(config)) return [];
+
+    const client = createR2Client(config);
+    const command = new ListObjectsV2Command({
+      Bucket: config.bucket_name,
+      MaxKeys: maxKeys,
+    });
+
+    const res = await client.send(command);
+    return (res.Contents || []).map((o) => ({
+      key: o.Key || '',
+      size: o.Size || 0,
+      lastModified: o.LastModified,
+    })).filter((o) => Boolean(o.key));
+  } catch (err: any) {
+    console.warn('[Cloudflare R2] Falha ao listar objetos do bucket:', err?.message || err);
+    return [];
+  }
+}
+
+export async function cleanupOrphanR2Media(): Promise<{
+  totalInR2: number;
+  orphansFound: number;
+  deletedCount: number;
+  freedBytes: number;
+  deletedKeys: string[];
+}> {
+  const config = getEffectiveR2Config();
+  if (!isR2Configured(config)) {
+    return { totalInR2: 0, orphansFound: 0, deletedCount: 0, freedBytes: 0, deletedKeys: [] };
+  }
+
+  const objects = await listR2Objects(1000);
+  const dbData = db.getData();
+  const allMedia = dbData.media || [];
+
+  // Build a set of all active R2 keys/filenames currently referenced by any media
+  const activeKeys = new Set<string>();
+  for (const m of allMedia) {
+    const urls = [m.file_url, m.local_url, (m as any).r2_url].filter(Boolean);
+    for (const u of urls) {
+      const extracted = extractR2Key(u);
+      if (extracted) {
+        activeKeys.add(extracted);
+        activeKeys.add(extracted.toLowerCase());
+      }
+      // Also record base filename
+      try {
+        const fn = u.split('?')[0].split('/').pop();
+        if (fn) {
+          activeKeys.add(fn);
+          activeKeys.add(fn.toLowerCase());
+        }
+      } catch {}
+    }
+  }
+
+  let deletedCount = 0;
+  let freedBytes = 0;
+  const deletedKeys: string[] = [];
+
+  for (const obj of objects) {
+    const k = obj.key;
+    const isReferenced = activeKeys.has(k) || activeKeys.has(k.toLowerCase());
+
+    if (!isReferenced) {
+      // It is an orphan object in R2 with no media in the app!
+      console.log('[Cloudflare R2 Cleanup] Excluindo mídia órfã/inútil do bucket:', k, `(${obj.size} bytes)`);
+      const success = await deleteFromR2(k);
+      if (success) {
+        deletedCount++;
+        freedBytes += obj.size;
+        deletedKeys.push(k);
+      }
+    }
+  }
+
+  return {
+    totalInR2: objects.length,
+    orphansFound: deletedKeys.length,
+    deletedCount,
+    freedBytes,
+    deletedKeys,
+  };
 }
 
 export async function getObjectFromR2(keyOrUrl: string, range?: string): Promise<{

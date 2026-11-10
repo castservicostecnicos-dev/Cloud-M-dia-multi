@@ -1034,7 +1034,12 @@ export async function handleClientFallbackRequest(
           },
         });
 
-        const urlsToDelete = [targetMedia?.file_url, targetMedia?.local_url].filter(Boolean);
+        const urlsToDelete = [
+          targetMedia?.file_url,
+          targetMedia?.local_url,
+          targetMedia?.r2_url,
+        ].filter(Boolean);
+
         for (const u of urlsToDelete) {
           let key = String(u).trim();
           if (key.includes('://')) {
@@ -1042,14 +1047,21 @@ export async function handleClientFallbackRequest(
               const p = new URL(key);
               key = decodeURIComponent(p.pathname.replace(/^\/+/, ''));
             } catch {
-              key = key.split('/').pop() || key;
+              key = key.split('?')[0].split('/').pop() || key;
             }
           } else {
-            key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
+            key = key.split('?')[0].replace(/^\/+/, '').replace(/^uploads\/+/, '').replace(/^api\/media\/stream\/+/, '');
           }
-          if (key && !key.startsWith('widget:') && !key.startsWith('data:') && !key.startsWith('idb:')) {
+
+          if (key && !key.startsWith('widget:') && !key.startsWith('data:') && !key.startsWith('idb:') && !key.startsWith('blob:')) {
             await s3.send(new DeleteObjectCommand({ Bucket: cleanBucket, Key: key })).catch(() => {});
             console.log('[Client Fallback] Objeto excluído do Cloudflare R2:', key);
+
+            // Also delete by base filename if path was nested
+            const baseFn = key.split('/').pop();
+            if (baseFn && baseFn !== key) {
+              await s3.send(new DeleteObjectCommand({ Bucket: cleanBucket, Key: baseFn })).catch(() => {});
+            }
           }
         }
       } catch (r2DelErr) {

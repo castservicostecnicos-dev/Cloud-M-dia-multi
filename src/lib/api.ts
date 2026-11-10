@@ -644,6 +644,19 @@ export const api = {
     }>('/r2/sync-local-media', {
       method: 'POST',
     }),
+
+  cleanupOrphanR2Media: () =>
+    request<{
+      status: string;
+      message: string;
+      totalInR2: number;
+      orphansFound: number;
+      deletedCount: number;
+      freedBytes: number;
+      deletedKeys: string[];
+    }>('/r2/cleanup-orphans', {
+      method: 'POST',
+    }),
   ensureDriveClientFoldersServer: (params: { clientName: string; customRootName?: string; clientDriveToken?: string }) =>
     request<{
       status: string;

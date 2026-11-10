@@ -15,6 +15,7 @@ import {
   UploadCloud,
   ChevronDown,
   ChevronUp,
+  Trash2,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { R2Settings } from '../types';
@@ -182,6 +183,31 @@ export const CloudflareR2ConfigModal: React.FC<CloudflareR2ConfigModalProps> = (
       });
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const [cleaning, setCleaning] = useState(false);
+
+  const handleCleanupOrphans = async () => {
+    if (!window.confirm('Deseja varrer o Cloudflare R2 e excluir permanentemente todos os arquivos de mídias que foram apagados no aplicativo?')) {
+      return;
+    }
+    try {
+      setCleaning(true);
+      setFeedback(null);
+      const res = await api.cleanupOrphanR2Media();
+      setFeedback({
+        type: res.deletedCount > 0 ? 'success' : 'info',
+        message: res.message,
+      });
+      if (onSaved) onSaved();
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err.message || 'Erro ao limpar mídias órfãs no R2.',
+      });
+    } finally {
+      setCleaning(false);
     }
   };
 
@@ -443,16 +469,29 @@ export const CloudflareR2ConfigModal: React.FC<CloudflareR2ConfigModalProps> = (
 
           {/* Rodapé / Botões */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-800">
-            <button
-              type="button"
-              onClick={handleSyncLocalMedia}
-              disabled={syncing || !form.is_configured}
-              className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer disabled:opacity-40"
-              title="Faz o upload de arquivos locais antigos para o Cloudflare R2"
-            >
-              <UploadCloud className={`h-3.5 w-3.5 ${syncing ? 'animate-bounce text-orange-400' : ''}`} />
-              <span>{syncing ? 'Sincronizando...' : 'Sincronizar Mídias Locais para o R2'}</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSyncLocalMedia}
+                disabled={syncing || cleaning || !form.is_configured}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 hover:text-white transition cursor-pointer disabled:opacity-40"
+                title="Faz o upload de arquivos locais antigos para o Cloudflare R2"
+              >
+                <UploadCloud className={`h-3.5 w-3.5 ${syncing ? 'animate-bounce text-orange-400' : ''}`} />
+                <span>{syncing ? 'Sincronizando...' : 'Sincronizar Locais'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCleanupOrphans}
+                disabled={cleaning || syncing || !form.is_configured}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-rose-800/60 bg-rose-950/40 hover:bg-rose-900/60 text-xs font-semibold text-rose-300 hover:text-rose-100 transition cursor-pointer disabled:opacity-40"
+                title="Varre e remove do bucket Cloudflare R2 todos os arquivos que já foram excluídos no aplicativo"
+              >
+                <Trash2 className={`h-3.5 w-3.5 ${cleaning ? 'animate-spin text-rose-400' : ''}`} />
+                <span>{cleaning ? 'Limpando R2...' : 'Limpar Mídias Órfãs do R2'}</span>
+              </button>
+            </div>
 
             <div className="flex items-center gap-2 ml-auto">
               <button

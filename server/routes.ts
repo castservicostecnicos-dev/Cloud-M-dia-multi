@@ -48,6 +48,8 @@ import {
   buildR2PublicUrl,
   sanitizeR2AccountId,
   sanitizeR2BucketName,
+  cleanupOrphanR2Media,
+  extractR2Key,
 } from './r2.js';
 import { processAndOptimizeVideo, probeVideoMetadata } from './videoTranscode.js';
 import { R2Settings } from '../src/types';
@@ -2742,13 +2744,25 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
   }));
 
   // 4. Delete object from Cloudflare R2 bucket
+  const r2TargetsToDelete = new Set<string>();
+  if (targetMedia.file_url) r2TargetsToDelete.add(targetMedia.file_url);
+  if (targetMedia.local_url) r2TargetsToDelete.add(targetMedia.local_url);
+  if ((targetMedia as any).r2_url) r2TargetsToDelete.add((targetMedia as any).r2_url);
   if (targetMedia.file_url) {
-    deleteFromR2(targetMedia.file_url).catch((err) =>
-      console.warn('[Cloudflare R2] Falha ao excluir mídia do bucket:', err?.message || err)
-    );
+    const fn = path.basename(targetMedia.file_url.split('?')[0]);
+    if (fn) r2TargetsToDelete.add(fn);
   }
-  if (targetMedia.local_url && targetMedia.local_url !== targetMedia.file_url) {
-    deleteFromR2(targetMedia.local_url).catch(() => {});
+  if (targetMedia.local_url) {
+    const fn = path.basename(targetMedia.local_url.split('?')[0]);
+    if (fn) r2TargetsToDelete.add(fn);
+  }
+
+  for (const r2Target of r2TargetsToDelete) {
+    try {
+      await deleteFromR2(r2Target);
+    } catch (err: any) {
+      console.warn('[Cloudflare R2] Falha ao excluir mídia do bucket:', r2Target, err?.message || err);
+    }
   }
 
   // 5. Delete binary from Firestore cloud chunks (both by media.id and by file basename)
@@ -5191,6 +5205,27 @@ apiRouter.post('/r2/sync-local-media', requireAuth, requireRole('admin', 'compan
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Erro ao sincronizar mídias com o R2.' });
+  }
+});
+
+// Limpar mídias órfãs/inúteis no Cloudflare R2 que já foram excluídas no app
+apiRouter.post('/r2/cleanup-orphans', requireAuth, requireRole('admin', 'company'), async (req: AuthenticatedRequest, res) => {
+  try {
+    const r2Config = getEffectiveR2Config();
+    if (!isR2Configured(r2Config)) {
+      return res.status(400).json({ error: 'Cloudflare R2 não está configurado.' });
+    }
+
+    const result = await cleanupOrphanR2Media();
+    res.json({
+      status: 'ok',
+      message: result.deletedCount > 0
+        ? `${result.deletedCount} mídia(s) inútil(is) excluída(s) com sucesso do Cloudflare R2 (${(result.freedBytes / (1024 * 1024)).toFixed(2)} MB liberados).`
+        : 'Nenhuma mídia órfã encontrada no Cloudflare R2. O bucket está 100% limpo e sincronizado.',
+      ...result,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Erro ao limpar mídias órfãs no Cloudflare R2.' });
   }
 });
 
