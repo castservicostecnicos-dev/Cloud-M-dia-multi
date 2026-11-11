@@ -2806,7 +2806,11 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 
   // 8. Persist changes to disk and cloud
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  try {
+    await saveDatabaseToFirestoreNow(data);
+  } catch (syncErr) {
+    console.warn('[DELETE Media] Failed to immediately save to Firestore:', syncErr);
+  }
 
   // 9. Inform active players and dashboards to update immediately
   try {
@@ -6392,12 +6396,17 @@ apiRouter.post('/drive/documents', (req, res) => {
   const isImageMime = category === 'photo' || (mime_type && String(mime_type).startsWith('image/')) || /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(file_name || '');
   if (isVideoMime || isImageMime) {
     const data = db.getData();
+    const mediaUrl = local_url || (drive_file_id ? `https://lh3.googleusercontent.com/d/${drive_file_id}` : drive_view_url);
+    const isDeleted =
+      isMediaOrUrlDeleted(data, code) ||
+      isMediaOrUrlDeleted(data, title) ||
+      isMediaOrUrlDeleted(data, file_name) ||
+      isMediaOrUrlDeleted(data, drive_file_id) ||
+      isMediaOrUrlDeleted(data, mediaUrl);
     const alreadyExists = data.media.some((m) => m.company_id === company_id && m.unique_code === code);
-    if (!alreadyExists) {
+    if (!alreadyExists && !isDeleted && mediaUrl) {
       const now = new Date().toISOString();
-      const mediaUrl = local_url || (drive_file_id ? `https://lh3.googleusercontent.com/d/${drive_file_id}` : drive_view_url);
-      if (mediaUrl) {
-        data.media.push({
+      data.media.push({
           id: `med-${Date.now()}`,
           company_id,
           name: title.trim(),
@@ -6419,10 +6428,9 @@ apiRouter.post('/drive/documents', (req, res) => {
         db.persist();
       }
     }
-  }
 
-  res.status(201).json({ status: 'ok', document: newDoc });
-});
+    res.status(201).json({ status: 'ok', document: newDoc });
+  });
 
 apiRouter.put('/drive/documents/:id', (req, res) => {
   const id = req.params.id;

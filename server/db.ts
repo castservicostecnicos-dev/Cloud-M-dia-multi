@@ -262,11 +262,26 @@ export function cleanFeedOrMediaName(name?: string | null): string {
     .trim();
 }
 
+export function extractCleanMediaKey(val?: string | null): string {
+  if (!val) return '';
+  return String(val)
+    .trim()
+    .toLowerCase()
+    .replace(/^idb:/i, '')
+    .replace(/^blob:/i, '')
+    .replace(/^\/?uploads\//i, '')
+    .replace(/^\/?api\/media\/stream\//i, '')
+    .replace(/^https?:\/\/[^/]+\//i, '')
+    .split('?')[0]
+    .replace(/\.[a-z0-9]+$/i, '');
+}
+
 export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | null): boolean {
   if (!identifier || !data.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
   const rawId = String(identifier).trim().toLowerCase();
   const normUrl = normalizeMediaUrl(identifier);
   const cleanName = cleanFeedOrMediaName(identifier);
+  const cleanKey = extractCleanMediaKey(rawId);
 
   return data.deleted_media_ids.some((d) => {
     if (!d) return false;
@@ -278,6 +293,10 @@ export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | 
 
     const cleanD = cleanFeedOrMediaName(d);
     if (cleanName && cleanD && cleanName === cleanD) return true;
+
+    // Check cleanKey (stripping idb:, uploads, extensions, etc.)
+    const cleanDKey = extractCleanMediaKey(rawD);
+    if (cleanKey && cleanDKey && cleanKey.length >= 6 && cleanKey === cleanDKey) return true;
 
     // Check basename if file path
     const baseId = path.basename(rawId.split('?')[0]);

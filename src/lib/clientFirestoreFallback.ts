@@ -35,17 +35,118 @@ function getClientFirestore() {
 
 const DEFAULT_DB = initialSnapshot as any;
 
+export function normalizeMediaUrl(url?: string | null): string {
+  if (!url) return '';
+  try {
+    return String(url)
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '')
+      .split('?')[0];
+  } catch {
+    return String(url || '').trim().toLowerCase();
+  }
+}
+
+export function cleanFeedOrMediaName(name?: string | null): string {
+  if (!name) return '';
+  return String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/^notícias\s*rss\s*[-–—:]\s*/i, '')
+    .replace(/^notícia\s*rss\s*[-–—:]\s*/i, '')
+    .replace(/^feed\s*rss\s*[-–—:]\s*/i, '')
+    .replace(/^rss\s*[-–—:]\s*/i, '')
+    .trim();
+}
+
+export function extractCleanMediaKey(val?: string | null): string {
+  if (!val) return '';
+  return String(val)
+    .trim()
+    .toLowerCase()
+    .replace(/^idb:/i, '')
+    .replace(/^blob:/i, '')
+    .replace(/^\/?uploads\//i, '')
+    .replace(/^\/?api\/media\/stream\//i, '')
+    .replace(/^https?:\/\/[^/]+\//i, '')
+    .split('?')[0]
+    .replace(/\.[a-z0-9]+$/i, '');
+}
+
+export function isMediaOrUrlDeleted(data: any, identifier?: string | null): boolean {
+  if (!identifier || !data?.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
+  const rawId = String(identifier).trim().toLowerCase();
+  const normUrl = normalizeMediaUrl(identifier);
+  const cleanName = cleanFeedOrMediaName(identifier);
+  const cleanKey = extractCleanMediaKey(rawId);
+
+  return data.deleted_media_ids.some((d: any) => {
+    if (!d) return false;
+    const rawD = String(d).trim().toLowerCase();
+    if (rawD === rawId) return true;
+
+    const normD = normalizeMediaUrl(d);
+    if (normUrl && normD && normUrl === normD) return true;
+
+    const cleanD = cleanFeedOrMediaName(d);
+    if (cleanName && cleanD && cleanName === cleanD) return true;
+
+    const cleanDKey = extractCleanMediaKey(rawD);
+    if (cleanKey && cleanDKey && cleanKey.length >= 6 && cleanKey === cleanDKey) return true;
+
+    const baseId = rawId.split('?')[0].split('/').pop() || '';
+    const baseD = rawD.split('?')[0].split('/').pop() || '';
+    if (baseId && baseD && baseId === baseD) return true;
+
+    return false;
+  });
+}
+
+export function isItemObjectDeleted(data: any, item: any): boolean {
+  if (!item) return true;
+  if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
+  if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
+  if (item.url && isMediaOrUrlDeleted(data, item.url)) return true;
+  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
+  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
+  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
+  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
+  if (item.unique_code && isMediaOrUrlDeleted(data, item.unique_code)) return true;
+  return false;
+}
+
 let cachedDb: any = null;
 let lastLoadedAt = 0;
 
 function normalizeDbShape(parsed: any) {
   const stores = parsed.company_stores || parsed.stores || [];
+  const deletedMediaIds = Array.from(
+    new Set([...(parsed.deleted_media_ids || []), ...(DEFAULT_DB.deleted_media_ids || [])])
+  );
   const normalized = {
     ...DEFAULT_DB,
     ...parsed,
     company_stores: stores,
     stores,
+    deleted_media_ids: deletedMediaIds,
   };
+
+  // Strictly filter out any media or playlist items that were deleted
+  const isDeleted = (item: any) => isItemObjectDeleted(normalized, item);
+  if (Array.isArray(normalized.media)) {
+    normalized.media = normalized.media.filter((m: any) => !isDeleted(m));
+  }
+  if (Array.isArray(normalized.playlists)) {
+    normalized.playlists = normalized.playlists.map((pl: any) => ({
+      ...pl,
+      items: (pl.items || []).filter((it: any) => !isDeleted(it)),
+    }));
+  }
+  if (Array.isArray(normalized.rss_feeds)) {
+    normalized.rss_feeds = normalized.rss_feeds.filter((r: any) => !isDeleted(r));
+  }
 
   // Hydrate idb: URLs if present in local IndexedDB or cache
   if (Array.isArray(normalized.media)) {
@@ -198,6 +299,17 @@ async function saveCloudDb(dbData: any): Promise<void> {
 
   dbData.company_stores = dbData.company_stores || dbData.stores || [];
   dbData.stores = dbData.company_stores;
+  dbData.deleted_media_ids = dbData.deleted_media_ids || [];
+
+  // Strictly filter out any deleted media, playlist items, or rss feeds
+  const isDeleted = (item: any) => isItemObjectDeleted(dbData, item);
+  dbData.media = (dbData.media || []).filter((m: any) => !isDeleted(m));
+  dbData.playlists = (dbData.playlists || []).map((pl: any) => ({
+    ...pl,
+    items: (pl.items || []).filter((it: any) => !isDeleted(it)),
+  }));
+  dbData.rss_feeds = (dbData.rss_feeds || []).filter((r: any) => !isDeleted(r));
+
   cachedDb = dbData;
   lastLoadedAt = Date.now();
 
@@ -663,10 +775,17 @@ export async function handleClientFallbackRequest(
     return (dbData.operators || []).filter((o: any) => o.company_id === activeCompanyId);
   }
   if (pathOnly === '/company/playlists' && method === 'GET') {
-    return (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId);
+    const isDeleted = (item: any) => isItemObjectDeleted(dbData, item);
+    return (dbData.playlists || [])
+      .filter((p: any) => !activeCompanyId || p.company_id === activeCompanyId)
+      .map((pl: any) => ({
+        ...pl,
+        items: (pl.items || []).filter((it: any) => !isDeleted(it)),
+      }));
   }
   if (pathOnly === '/company/media' && method === 'GET') {
-    const list = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
+    const isDeleted = (item: any) => isItemObjectDeleted(dbData, item);
+    const list = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId && !isDeleted(m));
     return list.map((m: any) => {
       const cached = getCachedIndexedDbMediaSync(m);
       if (cached) return { ...m, file_url: cached };
@@ -991,6 +1110,15 @@ export async function handleClientFallbackRequest(
     if (targetMedia?.file_url) {
       deleteIndexedDbMedia(targetMedia.file_url);
     }
+    if (targetMedia?.local_url) {
+      deleteIndexedDbMedia(targetMedia.local_url);
+    }
+    if (targetMedia?.unique_code) {
+      deleteIndexedDbMedia(targetMedia.unique_code);
+    }
+    if (targetMedia?.name) {
+      deleteIndexedDbMedia(targetMedia.name);
+    }
 
     dbData.media = (dbData.media || []).filter((m: any) => m.id !== medId);
 
@@ -1003,19 +1131,34 @@ export async function handleClientFallbackRequest(
       }
     }
 
-    // Register tombstone in deleted_media_ids
+    // Register comprehensive tombstones in deleted_media_ids
     dbData.deleted_media_ids = dbData.deleted_media_ids || [];
-    if (!dbData.deleted_media_ids.includes(medId)) {
-      dbData.deleted_media_ids.push(medId);
-    }
-    if (targetMedia?.name) {
-      dbData.deleted_media_ids.push(targetMedia.name.toLowerCase());
-    }
+    const tombstones = [
+      medId,
+      targetMedia?.name?.toLowerCase(),
+      cleanFeedOrMediaName(targetMedia?.name),
+      targetMedia?.file_url,
+      normalizeMediaUrl(targetMedia?.file_url),
+      targetMedia?.local_url,
+      normalizeMediaUrl(targetMedia?.local_url),
+      targetMedia?.drive_file_id,
+      targetMedia?.unique_code,
+      extractCleanMediaKey(medId),
+      extractCleanMediaKey(targetMedia?.file_url),
+      extractCleanMediaKey(targetMedia?.local_url),
+    ];
     if (targetMedia?.file_url) {
-      dbData.deleted_media_ids.push(targetMedia.file_url);
+      const baseFn = targetMedia.file_url.split('?')[0].split('/').pop();
+      if (baseFn) tombstones.push(baseFn);
     }
-    if (targetMedia?.drive_file_id) {
-      dbData.deleted_media_ids.push(targetMedia.drive_file_id);
+    if (targetMedia?.local_url) {
+      const baseFn = targetMedia.local_url.split('?')[0].split('/').pop();
+      if (baseFn) tombstones.push(baseFn);
+    }
+    for (const t of tombstones) {
+      if (t && !dbData.deleted_media_ids.includes(t)) {
+        dbData.deleted_media_ids.push(t);
+      }
     }
 
     // Delete from Cloudflare R2 if configured

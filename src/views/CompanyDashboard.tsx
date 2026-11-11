@@ -2052,10 +2052,35 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             };
           });
 
-          // Delete from browser local IndexedDB cache
-          deleteIndexedDbMedia(media.id).catch(() => {});
-          if (media.file_url) deleteIndexedDbMedia(media.file_url).catch(() => {});
-          if ((media as any).local_url) deleteIndexedDbMedia((media as any).local_url).catch(() => {});
+          // Delete from browser local IndexedDB cache and memory cache
+          await deleteIndexedDbMedia(media.id).catch(() => {});
+          if (media.file_url) await deleteIndexedDbMedia(media.file_url).catch(() => {});
+          if ((media as any).local_url) await deleteIndexedDbMedia((media as any).local_url).catch(() => {});
+          if ((media as any).unique_code) await deleteIndexedDbMedia((media as any).unique_code).catch(() => {});
+          if (media.name) await deleteIndexedDbMedia(media.name).catch(() => {});
+
+          // Purge from browser fallback cache so it never resurfaces on reload
+          try {
+            const cacheKey = 'indoor_media_cloudflare_cache';
+            const raw = localStorage.getItem(cacheKey);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (parsed) {
+                parsed.deleted_media_ids = parsed.deleted_media_ids || [];
+                parsed.deleted_media_ids.push(media.id);
+                if (media.file_url) parsed.deleted_media_ids.push(media.file_url);
+                if ((media as any).unique_code) parsed.deleted_media_ids.push((media as any).unique_code);
+                if (media.name) parsed.deleted_media_ids.push(media.name.toLowerCase());
+                parsed.media = (parsed.media || []).filter((m: any) => m.id !== media.id);
+                if (parsed.playlists) {
+                  for (const pl of parsed.playlists) {
+                    if (pl.items) pl.items = pl.items.filter((it: any) => it.media_id !== media.id);
+                  }
+                }
+                localStorage.setItem(cacheKey, JSON.stringify(parsed));
+              }
+            }
+          } catch {}
 
           const res = await api.deleteCompanyMedia(media.id);
           showToast('success', res.message);
@@ -3856,9 +3881,19 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         <div className="mt-3 pt-2 border-t border-slate-800 flex items-center justify-between gap-2">
                           <button
                             type="button"
-                            onClick={() => {
+                            onClick={async () => {
                               const targetMedia = mediaList.find((m) => m.id === issue.media_id);
-                              if (targetMedia) handleDeleteMedia(targetMedia);
+                              if (targetMedia) {
+                                handleDeleteMedia(targetMedia);
+                              } else {
+                                try {
+                                  await api.deleteCompanyMedia(issue.media_id);
+                                  showToast('success', 'Mídia com problema removida com sucesso.');
+                                  loadData();
+                                } catch (err: any) {
+                                  showToast('error', err.message || 'Erro ao remover mídia.');
+                                }
+                              }
                             }}
                             className="flex items-center gap-1 text-[11px] text-rose-400 hover:text-rose-300 font-medium ml-auto"
                           >
