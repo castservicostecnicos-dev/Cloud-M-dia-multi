@@ -365,6 +365,30 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
     cachedDb = normalizeDbShape(JSON.parse(JSON.stringify(DEFAULT_DB)));
   }
 
+  // Ensure cachedDb is ALWAYS purged of tombstones and orphan playlist items on any device
+  if (cachedDb) {
+    const combinedDeleted = Array.from(
+      new Set([...(cachedDb.deleted_media_ids || []), ...((DEFAULT_DB as any).deleted_media_ids || [])])
+    );
+    cachedDb.deleted_media_ids = combinedDeleted;
+    const isDeleted = (item: any) => isItemObjectDeleted(cachedDb, item);
+    cachedDb.media = (cachedDb.media || []).filter((m: any) => !isDeleted(m));
+    cachedDb.playlists = (cachedDb.playlists || []).map((pl: any) => ({
+      ...pl,
+      items: (pl.items || []).filter((it: any) => {
+        if (isDeleted(it)) return false;
+        let m = (cachedDb.media || []).find((media: any) => media.id === it.media_id);
+        if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+          m = (cachedDb.media || []).find((media: any) => (media.company_id === pl.company_id || !media.company_id) && media.type === 'weather_clock');
+        }
+        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+        if (!m && !isWeather) return false;
+        if (m && m.active === false) return false;
+        return true;
+      }),
+    }));
+  }
+
   return cachedDb;
 }
 
@@ -858,7 +882,17 @@ export async function handleClientFallbackRequest(
       .filter((p: any) => !activeCompanyId || p.company_id === activeCompanyId)
       .map((pl: any) => ({
         ...pl,
-        items: (pl.items || []).filter((it: any) => !isDeleted(it)),
+        items: (pl.items || []).filter((it: any) => {
+          if (isDeleted(it)) return false;
+          let m = (dbData.media || []).find((media: any) => media.id === it.media_id);
+          if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+            m = (dbData.media || []).find((media: any) => (media.company_id === pl.company_id || !media.company_id) && media.type === 'weather_clock');
+          }
+          const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+          if (!m && !isWeather) return false;
+          if (m && m.active === false) return false;
+          return true;
+        }),
       }));
   }
   if (pathOnly === '/company/media' && method === 'GET') {

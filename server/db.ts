@@ -1045,11 +1045,23 @@ class DatabaseStore {
         const filteredCloudMedia = (cloudData.media || []).filter((m) => !isDeletedItem(m));
         const filteredLocalMedia = (localData.media || []).filter((m) => !isDeletedItem(m));
 
-        // Filter out deleted items from playlists
+        const combinedMediaList = this.mergeById(filteredCloudMedia, filteredLocalMedia);
+
+        // Filter out deleted and orphan items from playlists
         const cleanPlaylistItems = (playlists: Playlist[] = []): Playlist[] => {
           return (playlists || []).map((pl) => ({
             ...pl,
-            items: (pl.items || []).filter((it) => !isDeletedItem(it)),
+            items: (pl.items || []).filter((it) => {
+              if (isDeletedItem(it)) return false;
+              let m = combinedMediaList.find((media) => media.id === it.media_id);
+              if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+                m = combinedMediaList.find((media) => (media.company_id === pl.company_id || !media.company_id) && media.type === 'weather_clock');
+              }
+              const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+              if (!m && !isWeather) return false;
+              if (m && m.active === false) return false;
+              return true;
+            }),
           }));
         };
 
@@ -1162,10 +1174,22 @@ class DatabaseStore {
         const filteredCloudMedia = (cloudData.media || []).filter((m) => !isDeletedItem(m));
         const filteredLocalMedia = (localData.media || []).filter((m) => !isDeletedItem(m));
 
+        const combinedMediaList = this.mergeById(filteredCloudMedia, filteredLocalMedia);
+
         const cleanPlaylistItems = (playlists: Playlist[] = []): Playlist[] => {
           return (playlists || []).map((pl) => ({
             ...pl,
-            items: (pl.items || []).filter((it) => !isDeletedItem(it)),
+            items: (pl.items || []).filter((it) => {
+              if (isDeletedItem(it)) return false;
+              let m = combinedMediaList.find((media) => media.id === it.media_id);
+              if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+                m = combinedMediaList.find((media) => (media.company_id === pl.company_id || !media.company_id) && media.type === 'weather_clock');
+              }
+              const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+              if (!m && !isWeather) return false;
+              if (m && m.active === false) return false;
+              return true;
+            }),
           }));
         };
 

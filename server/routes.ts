@@ -57,6 +57,14 @@ import { R2Settings } from '../src/types';
 
 export const apiRouter = Router();
 
+// Ensure all API endpoints are NEVER cached by browsers, proxies, or mobile devices
+apiRouter.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // Persistent Sessions
 export type Session = AuthSession;
 
@@ -1810,6 +1818,14 @@ apiRouter.delete('/company/operators/:id', requireAuth, requireRole('company'), 
 function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: any): Playlist {
   const activeItems = (playlist.items || []).filter((it) => {
     if (data && isItemObjectDeleted(data, it)) return false;
+    let media = mediaList.find((m) => m.id === it.media_id);
+    if (!media && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+      media = mediaList.find((m) => (m.company_id === playlist.company_id || !m.company_id) && m.type === 'weather_clock');
+    }
+    const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
+    // Ensure deleted media items never linger in playlists returned to any device!
+    if (!media && !isWeather) return false;
+    if (media && media.active === false) return false;
     return true;
   });
   return {

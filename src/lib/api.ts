@@ -36,6 +36,9 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
     ...(options.headers as Record<string, string>),
   };
 
@@ -78,6 +81,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   try {
     response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      cache: 'no-store',
       ...options,
       headers,
       signal: options.signal || controller.signal,

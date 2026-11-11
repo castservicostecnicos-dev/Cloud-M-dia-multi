@@ -963,7 +963,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     const targetCompId = companyInfo?.id || (stats?.company as any)?.id;
     let eventSource: EventSource | null = null;
     try {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('indoor_auth_token') : null;
+      const token =
+        getStoredToken() ||
+        (typeof localStorage !== 'undefined'
+          ? localStorage.getItem('indoor_media_token') || localStorage.getItem('indoor_auth_token')
+          : null);
       const params = new URLSearchParams();
       if (token) params.append('token', token);
       if (targetCompId) params.append('companyId', targetCompId);
