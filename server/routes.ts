@@ -22,6 +22,7 @@ import {
   ensureCompanyDefaultMedia,
   isMediaOrUrlDeleted,
   isItemObjectDeleted,
+  unmarkAsDeleted,
   cleanFeedOrMediaName,
   normalizeMediaUrl,
   DEFAULT_RSS_FEEDS,
@@ -1814,12 +1815,16 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: 
   return {
     ...playlist,
     items: activeItems.map((it) => {
-      const media = mediaList.find((m) => m.id === it.media_id);
+      let media = mediaList.find((m) => m.id === it.media_id);
+      if (!media && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+        media = mediaList.find((m) => (m.company_id === playlist.company_id || !m.company_id) && m.type === 'weather_clock');
+      }
+      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
       return {
         ...it,
-        name: media?.name || it.name || 'Mídia',
-        type: media?.type || it.type || 'image',
-        file_url: media?.file_url || it.file_url || '',
+        name: media?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
+        type: media?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
+        file_url: media?.file_url || (isWeather ? 'widget:weather_clock' : (it.file_url || '')),
         local_url: media?.local_url || (it as any).local_url || (media?.file_url?.startsWith('/uploads/') ? media.file_url : undefined),
         drive_file_id: media?.drive_file_id || (it as any).drive_file_id || undefined,
         drive_view_url: media?.drive_view_url || (it as any).drive_view_url || undefined,
@@ -2094,7 +2099,20 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
       updated_at: now,
     };
     data.media.push(weatherMedia);
+  } else {
+    weatherMedia.active = true;
+    weatherMedia.updated_at = now;
   }
+
+  // Ensure weather is never blocked by tombstones
+  unmarkAsDeleted(
+    data,
+    weatherMedia.id,
+    weatherMedia.name,
+    'widget:weather_clock',
+    'med-weather-clock',
+    'hora certa & previsão do tempo'
+  );
 
   const newItem: PlaylistItem = {
     id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2109,6 +2127,7 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
   playlist.items.push(newItem);
   playlist.updated_at = now;
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
@@ -2164,7 +2183,14 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
       updated_at: now,
     };
     data.media.push(rssMedia);
+  } else {
+    rssMedia.active = true;
+    rssMedia.updated_at = now;
+    if (name) rssMedia.name = name;
   }
+
+  // Ensure RSS media and URL are never blocked by tombstones
+  unmarkAsDeleted(data, rssMedia.id, rssMedia.name, rssMedia.file_url);
 
   const newItem: PlaylistItem = {
     id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2179,6 +2205,7 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
   playlist.items.push(newItem);
   playlist.updated_at = now;
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
@@ -2572,6 +2599,7 @@ apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (
   };
 
   data.media.push(newMedia);
+  unmarkAsDeleted(data, newMedia.id, newMedia.name, newMedia.file_url, newMedia.unique_code);
 
   let playlistsUpdatedCount = 0;
   if (req.body.addToAllPlaylists) {
@@ -2616,6 +2644,7 @@ apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (
   }
 
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(newMedia.company_id, 'created', newMedia);
@@ -2700,41 +2729,55 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
     }
   }
 
-  // 3. Register tombstone in deleted_media_ids so default seeder and drive scanners never resurrect it
+  // 3. Register tombstone in deleted_media_ids so deleted physical files never resurrect
   data.deleted_media_ids = data.deleted_media_ids || [];
-  const tombstonesToAdd: (string | undefined)[] = [
-    id,
-    targetMedia.name?.toLowerCase(),
-    cleanFeedOrMediaName(targetMedia.name),
-    targetMedia.file_url,
-    normalizeMediaUrl(targetMedia.file_url),
-    targetMedia.local_url,
-    normalizeMediaUrl(targetMedia.local_url),
-    targetMedia.drive_file_id,
-    targetMedia.unique_code,
-  ];
-  if (targetMedia.file_url) {
-    const fn = path.basename(targetMedia.file_url.split('?')[0]);
-    if (fn) tombstonesToAdd.push(fn);
-  }
-  if (targetMedia.local_url) {
-    const fn = path.basename(targetMedia.local_url.split('?')[0]);
-    if (fn) tombstonesToAdd.push(fn);
-  }
 
-  for (const t of tombstonesToAdd) {
-    if (t && !data.deleted_media_ids.includes(t)) {
-      data.deleted_media_ids.push(t);
+  const isWidget =
+    targetMedia.type === 'weather_clock' ||
+    targetMedia.file_url === 'widget:weather_clock' ||
+    String(targetMedia.file_url || '').startsWith('widget:') ||
+    (targetMedia.name && targetMedia.name.toLowerCase().includes('hora certa & previsão'));
+
+  const isLinkOrRss =
+    targetMedia.type === 'rss' ||
+    targetMedia.source === 'url' ||
+    String(targetMedia.file_url || '').startsWith('http://') ||
+    String(targetMedia.file_url || '').startsWith('https://');
+
+  if (!isWidget) {
+    const tombstonesToAdd: (string | undefined)[] = [id];
+
+    // Only for physical uploaded files (photos/videos): blacklist filename, code, local path, and storage URLs
+    if (!isLinkOrRss) {
+      tombstonesToAdd.push(
+        targetMedia.name?.toLowerCase(),
+        cleanFeedOrMediaName(targetMedia.name),
+        targetMedia.file_url,
+        normalizeMediaUrl(targetMedia.file_url),
+        targetMedia.local_url,
+        normalizeMediaUrl(targetMedia.local_url),
+        targetMedia.drive_file_id,
+        targetMedia.unique_code
+      );
+      if (targetMedia.file_url) {
+        const fn = path.basename(targetMedia.file_url.split('?')[0]);
+        if (fn) tombstonesToAdd.push(fn);
+      }
+      if (targetMedia.local_url) {
+        const fn = path.basename(targetMedia.local_url.split('?')[0]);
+        if (fn) tombstonesToAdd.push(fn);
+      }
+    }
+
+    for (const t of tombstonesToAdd) {
+      if (t && !data.deleted_media_ids.includes(t)) {
+        data.deleted_media_ids.push(t);
+      }
     }
   }
 
   if (targetMedia.drive_file_id && data.drive_documents) {
     data.drive_documents = data.drive_documents.filter((d) => d.drive_file_id !== targetMedia.drive_file_id);
-  }
-
-  // If deleted media is an RSS feed, also remove from rss_feeds list
-  if (targetMedia.type === 'rss' || targetMedia.file_url?.match(/\.xml($|\?)|rss/i)) {
-    data.rss_feeds = (data.rss_feeds || []).filter((r) => !isItemObjectDeleted(data, r));
   }
 
   // Clean all playlist items
@@ -3864,7 +3907,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
     position: number;
     duration: number;
     name: string;
-    type: 'image' | 'video' | 'rss';
+    type: 'image' | 'video' | 'rss' | 'weather_clock';
     file_url: string;
   }> = [];
 
@@ -3877,19 +3920,23 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
           const isDeleted = isItemObjectDeleted(data, it);
           if (isDeleted) return null;
 
-          const m = data.media.find((media) => media.id === it.media_id);
+          let m = data.media.find((media) => media.id === it.media_id);
           // If media was removed from data.media, do not send phantom items to player (except dynamic weather widget)
-          if (!m && it.type !== 'weather_clock') return null;
+          if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+            m = data.media.find((media) => (media.company_id === company!.id || !media.company_id) && media.type === 'weather_clock');
+          }
+          const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+          if (!m && !isWeather) return null;
           // If media exists and is explicitly marked inactive, skip it
           if (m && m.active === false) return null;
 
-          const mediaType = m?.type || it.type || (it.file_url?.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'image');
-          const mediaName = m?.name || it.name || 'Mídia';
-          const mediaFileUrl = m?.file_url || it.file_url || '';
+          const mediaType = m?.type || (isWeather ? 'weather_clock' : it.type) || (it.file_url?.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'image');
+          const mediaName = m?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia');
+          const mediaFileUrl = m?.file_url || (isWeather ? 'widget:weather_clock' : (it.file_url || ''));
           const mediaLocalUrl = m?.local_url || (it as any).local_url || (mediaFileUrl?.startsWith('/uploads/') ? mediaFileUrl : undefined);
 
           // If no media object and no file_url, and not weather_clock/rss, skip invalid item
-          if (!m && !mediaFileUrl && mediaType !== 'weather_clock') return null;
+          if (!m && !mediaFileUrl && !isWeather) return null;
 
           return {
             id: it.id,

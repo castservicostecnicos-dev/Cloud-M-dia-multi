@@ -279,6 +279,18 @@ export function extractCleanMediaKey(val?: string | null): string {
 export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | null): boolean {
   if (!identifier || !data.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
   const rawId = String(identifier).trim().toLowerCase();
+
+  // Weather widgets and system clocks are renewable features and must NEVER be treated as deleted
+  if (
+    rawId === 'widget:weather_clock' ||
+    rawId === 'med-weather-clock' ||
+    rawId.includes('weather_clock') ||
+    rawId.includes('hora certa & previsão') ||
+    rawId.includes('previsao do tempo')
+  ) {
+    return false;
+  }
+
   const normUrl = normalizeMediaUrl(identifier);
   const cleanName = cleanFeedOrMediaName(identifier);
   const cleanKey = extractCleanMediaKey(rawId);
@@ -286,6 +298,17 @@ export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | 
   return data.deleted_media_ids.some((d) => {
     if (!d) return false;
     const rawD = String(d).trim().toLowerCase();
+
+    // Skip weather widgets in tombstone check
+    if (
+      rawD === 'widget:weather_clock' ||
+      rawD === 'med-weather-clock' ||
+      rawD.includes('weather_clock') ||
+      rawD.includes('hora certa & previsão')
+    ) {
+      return false;
+    }
+
     if (rawD === rawId) return true;
 
     const normD = normalizeMediaUrl(d);
@@ -309,15 +332,75 @@ export function isMediaOrUrlDeleted(data: DatabaseSchema, identifier?: string | 
 
 export function isItemObjectDeleted(data: DatabaseSchema, item: any): boolean {
   if (!item) return true;
+
+  // 1. Weather and Clock widgets must NEVER be deleted or blocked
+  if (
+    item.type === 'weather_clock' ||
+    item.file_url === 'widget:weather_clock' ||
+    String(item.file_url || '').startsWith('widget:') ||
+    (item.name && String(item.name).toLowerCase().includes('hora certa & previsão'))
+  ) {
+    return false;
+  }
+
+  // 2. For RSS and web links: when the user adds/re-adds a link, never block by URL or name
+  if (item.type === 'rss') {
+    // Only check if this exact specific media ID is in deleted_media_ids
+    if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
+    if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
+    return false;
+  }
+
+  // 3. For uploaded files (photos and videos): check ID, media_id, local_url, unique_code, and file_url
   if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
   if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
-  if (item.url && isMediaOrUrlDeleted(data, item.url)) return true;
-  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
-  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
-  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
-  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
   if (item.unique_code && isMediaOrUrlDeleted(data, item.unique_code)) return true;
+  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
+  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
+  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
+  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
+
   return false;
+}
+
+/**
+ * Removes identifiers from deleted_media_ids when a user explicitly creates or re-adds a media, link, or widget.
+ */
+export function unmarkAsDeleted(data: DatabaseSchema, ...identifiers: (string | undefined | null)[]): boolean {
+  if (!data.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
+  const toRemove = new Set<string>();
+
+  for (const id of identifiers) {
+    if (!id) continue;
+    const raw = String(id).trim().toLowerCase();
+    toRemove.add(raw);
+    const cleanK = extractCleanMediaKey(raw);
+    if (cleanK) toRemove.add(cleanK);
+    const norm = normalizeMediaUrl(id);
+    if (norm) toRemove.add(norm);
+    const cleanN = cleanFeedOrMediaName(id);
+    if (cleanN) toRemove.add(cleanN);
+    const base = path.basename(raw.split('?')[0]);
+    if (base) toRemove.add(base);
+  }
+
+  const initialLen = data.deleted_media_ids.length;
+  data.deleted_media_ids = data.deleted_media_ids.filter((d) => {
+    if (!d) return false;
+    const rawD = String(d).trim().toLowerCase();
+    if (toRemove.has(rawD)) return false;
+    const cleanD = extractCleanMediaKey(rawD);
+    if (cleanD && toRemove.has(cleanD)) return false;
+    const normD = normalizeMediaUrl(d);
+    if (normD && toRemove.has(normD)) return false;
+    const cleanND = cleanFeedOrMediaName(d);
+    if (cleanND && toRemove.has(cleanND)) return false;
+    const baseD = path.basename(rawD.split('?')[0]);
+    if (baseD && toRemove.has(baseD)) return false;
+    return true;
+  });
+
+  return data.deleted_media_ids.length !== initialLen;
 }
 
 export function ensureCompanyDefaultMedia(
@@ -936,7 +1019,23 @@ class DatabaseStore {
         // Merge tombstones (deleted media IDs, URLs, and filenames)
         const combinedDeletedIds = Array.from(
           new Set([...(cloudData.deleted_media_ids || []), ...(localData.deleted_media_ids || [])])
-        );
+        ).filter((d) => {
+          if (!d) return false;
+          const s = String(d).trim().toLowerCase();
+          if (
+            s === 'widget:weather_clock' ||
+            s === 'med-weather-clock' ||
+            s.includes('weather_clock') ||
+            s === 'hora certa & previsão do tempo' ||
+            s.includes('previsão do tempo') ||
+            s.startsWith('http://') ||
+            s.startsWith('https://') ||
+            s.endsWith('.xml')
+          ) {
+            return false;
+          }
+          return true;
+        });
 
         // Helper to check if any media or item was deleted using complete normalization
         const tempStoreForDeleted = { deleted_media_ids: combinedDeletedIds } as DatabaseSchema;
@@ -961,8 +1060,8 @@ class DatabaseStore {
           new Set([...(cloudData.seeded_companies || []), ...(localData.seeded_companies || [])])
         );
 
-        const filteredCloudRss = (cloudData.rss_feeds || []).filter((r) => !isDeletedItem(r));
-        const filteredLocalRss = (localData.rss_feeds || []).filter((r) => !isDeletedItem(r));
+        const filteredCloudRss = cloudData.rss_feeds || [];
+        const filteredLocalRss = localData.rss_feeds || [];
 
         this.data = {
           users: this.mergeById(cloudData.users, localData.users),
@@ -1040,7 +1139,23 @@ class DatabaseStore {
 
         const combinedDeletedIds = Array.from(
           new Set([...(cloudData.deleted_media_ids || []), ...(localData.deleted_media_ids || [])])
-        );
+        ).filter((d) => {
+          if (!d) return false;
+          const s = String(d).trim().toLowerCase();
+          if (
+            s === 'widget:weather_clock' ||
+            s === 'med-weather-clock' ||
+            s.includes('weather_clock') ||
+            s === 'hora certa & previsão do tempo' ||
+            s.includes('previsão do tempo') ||
+            s.startsWith('http://') ||
+            s.startsWith('https://') ||
+            s.endsWith('.xml')
+          ) {
+            return false;
+          }
+          return true;
+        });
         const tempStoreForDeleted = { deleted_media_ids: combinedDeletedIds } as DatabaseSchema;
         const isDeletedItem = (item: any) => isItemObjectDeleted(tempStoreForDeleted, item);
 
@@ -1075,10 +1190,7 @@ class DatabaseStore {
             ...m,
             active: m.active !== false,
           })),
-          rss_feeds: this.mergeById(
-            (cloudData.rss_feeds || []).filter((r) => !isDeletedItem(r)),
-            (localData.rss_feeds || []).filter((r) => !isDeletedItem(r))
-          ),
+          rss_feeds: this.mergeById(cloudData.rss_feeds || [], localData.rss_feeds || []),
           sessions: Array.from(sessionMap.values()).slice(-200),
           proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs || [], localData.proof_of_play_logs || []).slice(-5000),
           deleted_media_ids: combinedDeletedIds,

@@ -78,6 +78,18 @@ export function extractCleanMediaKey(val?: string | null): string {
 export function isMediaOrUrlDeleted(data: any, identifier?: string | null): boolean {
   if (!identifier || !data?.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
   const rawId = String(identifier).trim().toLowerCase();
+
+  // Weather widgets and system clocks are renewable features and must NEVER be treated as deleted
+  if (
+    rawId === 'widget:weather_clock' ||
+    rawId === 'med-weather-clock' ||
+    rawId.includes('weather_clock') ||
+    rawId.includes('hora certa & previsão') ||
+    rawId.includes('previsao do tempo')
+  ) {
+    return false;
+  }
+
   const normUrl = normalizeMediaUrl(identifier);
   const cleanName = cleanFeedOrMediaName(identifier);
   const cleanKey = extractCleanMediaKey(rawId);
@@ -85,6 +97,16 @@ export function isMediaOrUrlDeleted(data: any, identifier?: string | null): bool
   return data.deleted_media_ids.some((d: any) => {
     if (!d) return false;
     const rawD = String(d).trim().toLowerCase();
+
+    if (
+      rawD === 'widget:weather_clock' ||
+      rawD === 'med-weather-clock' ||
+      rawD.includes('weather_clock') ||
+      rawD.includes('hora certa & previsão')
+    ) {
+      return false;
+    }
+
     if (rawD === rawId) return true;
 
     const normD = normalizeMediaUrl(d);
@@ -106,15 +128,71 @@ export function isMediaOrUrlDeleted(data: any, identifier?: string | null): bool
 
 export function isItemObjectDeleted(data: any, item: any): boolean {
   if (!item) return true;
+
+  // 1. Weather and Clock widgets must NEVER be deleted or blocked
+  if (
+    item.type === 'weather_clock' ||
+    item.file_url === 'widget:weather_clock' ||
+    String(item.file_url || '').startsWith('widget:') ||
+    (item.name && String(item.name).toLowerCase().includes('hora certa & previsão'))
+  ) {
+    return false;
+  }
+
+  // 2. For RSS and web links: when the user adds/re-adds a link, never block by URL or name
+  if (item.type === 'rss') {
+    if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
+    if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
+    return false;
+  }
+
+  // 3. For uploaded files (photos and videos): check ID, media_id, local_url, unique_code, and file_url
   if (item.id && isMediaOrUrlDeleted(data, item.id)) return true;
   if (item.media_id && isMediaOrUrlDeleted(data, item.media_id)) return true;
-  if (item.url && isMediaOrUrlDeleted(data, item.url)) return true;
-  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
-  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
-  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
-  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
   if (item.unique_code && isMediaOrUrlDeleted(data, item.unique_code)) return true;
+  if (item.local_url && isMediaOrUrlDeleted(data, item.local_url)) return true;
+  if (item.drive_file_id && isMediaOrUrlDeleted(data, item.drive_file_id)) return true;
+  if (item.file_url && isMediaOrUrlDeleted(data, item.file_url)) return true;
+  if (item.name && isMediaOrUrlDeleted(data, item.name)) return true;
+
   return false;
+}
+
+export function unmarkAsDeleted(data: any, ...identifiers: (string | undefined | null)[]): boolean {
+  if (!data?.deleted_media_ids || data.deleted_media_ids.length === 0) return false;
+  const toRemove = new Set<string>();
+
+  for (const id of identifiers) {
+    if (!id) continue;
+    const raw = String(id).trim().toLowerCase();
+    toRemove.add(raw);
+    const cleanK = extractCleanMediaKey(raw);
+    if (cleanK) toRemove.add(cleanK);
+    const norm = normalizeMediaUrl(id);
+    if (norm) toRemove.add(norm);
+    const cleanN = cleanFeedOrMediaName(id);
+    if (cleanN) toRemove.add(cleanN);
+    const base = raw.split('?')[0].split('/').pop();
+    if (base) toRemove.add(base);
+  }
+
+  const initialLen = data.deleted_media_ids.length;
+  data.deleted_media_ids = data.deleted_media_ids.filter((d: any) => {
+    if (!d) return false;
+    const rawD = String(d).trim().toLowerCase();
+    if (toRemove.has(rawD)) return false;
+    const cleanD = extractCleanMediaKey(rawD);
+    if (cleanD && toRemove.has(cleanD)) return false;
+    const normD = normalizeMediaUrl(d);
+    if (normD && toRemove.has(normD)) return false;
+    const cleanND = cleanFeedOrMediaName(d);
+    if (cleanND && toRemove.has(cleanND)) return false;
+    const baseD = rawD.split('?')[0].split('/').pop();
+    if (baseD && toRemove.has(baseD)) return false;
+    return true;
+  });
+
+  return data.deleted_media_ids.length !== initialLen;
 }
 
 let cachedDb: any = null;
@@ -1033,6 +1111,7 @@ export async function handleClientFallbackRequest(
       ...body,
     };
     dbData.media = [newMedia, ...(dbData.media || [])];
+    unmarkAsDeleted(dbData, newMedia.id, newMedia.name, newMedia.file_url, (newMedia as any).unique_code);
 
     if (body.addToAllPlaylists) {
       const nowStr = new Date().toISOString();
@@ -1133,31 +1212,50 @@ export async function handleClientFallbackRequest(
 
     // Register comprehensive tombstones in deleted_media_ids
     dbData.deleted_media_ids = dbData.deleted_media_ids || [];
-    const tombstones = [
-      medId,
-      targetMedia?.name?.toLowerCase(),
-      cleanFeedOrMediaName(targetMedia?.name),
-      targetMedia?.file_url,
-      normalizeMediaUrl(targetMedia?.file_url),
-      targetMedia?.local_url,
-      normalizeMediaUrl(targetMedia?.local_url),
-      targetMedia?.drive_file_id,
-      targetMedia?.unique_code,
-      extractCleanMediaKey(medId),
-      extractCleanMediaKey(targetMedia?.file_url),
-      extractCleanMediaKey(targetMedia?.local_url),
-    ];
-    if (targetMedia?.file_url) {
-      const baseFn = targetMedia.file_url.split('?')[0].split('/').pop();
-      if (baseFn) tombstones.push(baseFn);
-    }
-    if (targetMedia?.local_url) {
-      const baseFn = targetMedia.local_url.split('?')[0].split('/').pop();
-      if (baseFn) tombstones.push(baseFn);
-    }
-    for (const t of tombstones) {
-      if (t && !dbData.deleted_media_ids.includes(t)) {
-        dbData.deleted_media_ids.push(t);
+
+    const isWidget =
+      targetMedia?.type === 'weather_clock' ||
+      targetMedia?.file_url === 'widget:weather_clock' ||
+      String(targetMedia?.file_url || '').startsWith('widget:') ||
+      (targetMedia?.name && targetMedia.name.toLowerCase().includes('hora certa & previsão'));
+
+    const isLinkOrRss =
+      targetMedia?.type === 'rss' ||
+      targetMedia?.source === 'url' ||
+      String(targetMedia?.file_url || '').startsWith('http://') ||
+      String(targetMedia?.file_url || '').startsWith('https://');
+
+    if (!isWidget) {
+      const tombstones = [medId];
+
+      if (!isLinkOrRss) {
+        tombstones.push(
+          targetMedia?.name?.toLowerCase(),
+          cleanFeedOrMediaName(targetMedia?.name),
+          targetMedia?.file_url,
+          normalizeMediaUrl(targetMedia?.file_url),
+          targetMedia?.local_url,
+          normalizeMediaUrl(targetMedia?.local_url),
+          targetMedia?.drive_file_id,
+          targetMedia?.unique_code,
+          extractCleanMediaKey(medId),
+          extractCleanMediaKey(targetMedia?.file_url),
+          extractCleanMediaKey(targetMedia?.local_url)
+        );
+        if (targetMedia?.file_url) {
+          const baseFn = targetMedia.file_url.split('?')[0].split('/').pop();
+          if (baseFn) tombstones.push(baseFn);
+        }
+        if (targetMedia?.local_url) {
+          const baseFn = targetMedia.local_url.split('?')[0].split('/').pop();
+          if (baseFn) tombstones.push(baseFn);
+        }
+      }
+
+      for (const t of tombstones) {
+        if (t && !dbData.deleted_media_ids.includes(t)) {
+          dbData.deleted_media_ids.push(t);
+        }
       }
     }
 
@@ -1506,37 +1604,112 @@ export async function handleClientFallbackRequest(
   }
 
   if (pathOnly === '/company/weather/add-to-playlist' && method === 'POST') {
-    const { playlistId, city, duration } = body;
-    const pl = (dbData.playlists || []).find((p: any) => p.id === playlistId);
+    const targetPlaylistId = body.playlist_id || body.playlistId;
+    const pl = targetPlaylistId
+      ? (dbData.playlists || []).find((p: any) => p.id === targetPlaylistId && p.company_id === activeCompanyId)
+      : (dbData.playlists || []).find((p: any) => p.company_id === activeCompanyId);
     if (!pl) throw new Error('Playlist não encontrada.');
+
+    const nowStr = new Date().toISOString();
+    let weatherMedia = (dbData.media || []).find(
+      (m: any) => m.company_id === activeCompanyId && m.type === 'weather_clock'
+    );
+    if (!weatherMedia) {
+      weatherMedia = {
+        id: `med-${activeCompanyId}-weather`,
+        company_id: activeCompanyId,
+        name: 'Hora Certa & Previsão do Tempo',
+        type: 'weather_clock',
+        file_url: 'widget:weather_clock',
+        duration: Number(body.duration) || 12,
+        active: true,
+        created_at: nowStr,
+        updated_at: nowStr,
+      };
+      dbData.media = [weatherMedia, ...(dbData.media || [])];
+    } else {
+      weatherMedia.active = true;
+      weatherMedia.updated_at = nowStr;
+    }
+
+    unmarkAsDeleted(
+      dbData,
+      weatherMedia.id,
+      weatherMedia.name,
+      'widget:weather_clock',
+      'med-weather-clock',
+      'hora certa & previsão do tempo'
+    );
+
     const newItem = {
-      id: `wth-${Date.now()}`,
-      type: 'weather',
-      city: city || 'São Paulo',
-      duration: Number(duration) || 15,
+      id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      playlist_id: pl.id,
+      media_id: weatherMedia.id,
+      name: weatherMedia.name,
+      type: 'weather_clock',
+      file_url: 'widget:weather_clock',
+      duration: Number(body.duration) || weatherMedia.duration || 12,
       position: (pl.items || []).length + 1,
+      created_at: nowStr,
     };
     pl.items = [...(pl.items || []), newItem];
-    pl.updated_at = new Date().toISOString();
+    pl.updated_at = nowStr;
     await saveCloudDb(dbData);
-    return { message: 'Previsão do tempo adicionada à playlist.', playlist: pl, item: newItem };
+    return { message: 'Hora Certa & Previsão do Tempo adicionada à playlist.', playlist: pl, item: newItem };
   }
 
   if (pathOnly === '/company/rss/add-to-playlist' && method === 'POST') {
-    const { playlistId, rssFeedId, duration } = body;
-    const pl = (dbData.playlists || []).find((p: any) => p.id === playlistId);
+    const targetPlaylistId = body.playlist_id || body.playlistId;
+    const pl = targetPlaylistId
+      ? (dbData.playlists || []).find((p: any) => p.id === targetPlaylistId && p.company_id === activeCompanyId)
+      : (dbData.playlists || []).find((p: any) => p.company_id === activeCompanyId);
     if (!pl) throw new Error('Playlist não encontrada.');
-    const feed = (dbData.rss_feeds || []).find((r: any) => r.id === rssFeedId);
+
+    const rssUrl = String(body.rss_url || body.url || '').trim();
+    const feed = (dbData.rss_feeds || []).find(
+      (r: any) => (r.id === body.rssFeedId || r.id === body.rss_feed_id || r.url === rssUrl) && r.company_id === activeCompanyId
+    );
+    const feedUrl = rssUrl || feed?.url;
+    if (!feedUrl) throw new Error('URL do Feed RSS não encontrada.');
+
+    const nowStr = new Date().toISOString();
+    let rssMedia = (dbData.media || []).find(
+      (m: any) => m.company_id === activeCompanyId && m.type === 'rss' && m.file_url === feedUrl
+    );
+    if (!rssMedia) {
+      rssMedia = {
+        id: `med-${activeCompanyId}-rss-${Date.now()}`,
+        company_id: activeCompanyId,
+        name: body.name || feed?.name || 'Notícias RSS em Tempo Real',
+        type: 'rss',
+        file_url: feedUrl,
+        duration: Number(body.duration) || 15,
+        active: true,
+        created_at: nowStr,
+        updated_at: nowStr,
+      };
+      dbData.media = [rssMedia, ...(dbData.media || [])];
+    } else {
+      rssMedia.active = true;
+      rssMedia.updated_at = nowStr;
+      if (body.name) rssMedia.name = body.name;
+    }
+
+    unmarkAsDeleted(dbData, rssMedia.id, rssMedia.name, rssMedia.file_url);
+
     const newItem = {
-      id: `rss-item-${Date.now()}`,
+      id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      playlist_id: pl.id,
+      media_id: rssMedia.id,
+      name: rssMedia.name,
       type: 'rss',
-      rss_feed_id: rssFeedId,
-      name: feed?.name || 'Feed RSS',
-      duration: Number(duration) || 15,
+      file_url: rssMedia.file_url,
+      duration: Number(body.duration) || rssMedia.duration || 15,
       position: (pl.items || []).length + 1,
+      created_at: nowStr,
     };
     pl.items = [...(pl.items || []), newItem];
-    pl.updated_at = new Date().toISOString();
+    pl.updated_at = nowStr;
     await saveCloudDb(dbData);
     return { message: 'Feed RSS adicionado à playlist.', playlist: pl, item: newItem };
   }

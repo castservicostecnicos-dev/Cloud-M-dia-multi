@@ -1610,7 +1610,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       items: [
         ...prev.items,
         {
+          id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           media_id: weatherMedia!.id,
+          name: weatherMedia!.name,
+          type: 'weather_clock',
+          file_url: 'widget:weather_clock',
           duration: 12,
         },
       ],
@@ -1889,13 +1893,22 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         }
 
         const currentCompanyId = companyInfo?.id || (stats?.company as any)?.id || undefined;
-        const singleTitle = mediaForm.name.trim() || (mediaSourceType === 'rss' ? 'Notícias RSS' : 'Nova Mídia');
+        const singleTitle =
+          mediaForm.name.trim() ||
+          (mediaSourceType === 'weather_clock'
+            ? 'Hora Certa & Previsão do Tempo'
+            : mediaSourceType === 'rss'
+            ? 'Notícias RSS'
+            : 'Nova Mídia');
+        const itemDuration =
+          Number(mediaForm.duration) ||
+          (mediaSourceType === 'weather_clock' ? 12 : mediaSourceType === 'rss' ? 15 : 10);
         const created = await api.uploadCompanyMedia({
           company_id: currentCompanyId,
           name: singleTitle,
           type: mediaSourceType === 'weather_clock' ? 'weather_clock' : mediaSourceType === 'rss' ? 'rss' : mediaForm.type,
           file_url: targetFileUrl,
-          duration: Number(mediaForm.duration) || 10,
+          duration: itemDuration,
           addToAllPlaylists: isTargetAllPlaylists,
         });
 
@@ -2019,16 +2032,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         try {
           // Immediately purge from client state so UI never reflects the deleted media
           setMediaList((prev) => prev.filter((m) => m.id !== media.id));
-          if (media.type === 'rss') {
-            setRssList((prev) =>
-              prev.filter(
-                (r) =>
-                  r.id !== media.id &&
-                  r.url !== media.file_url &&
-                  r.name.toLowerCase() !== media.name?.toLowerCase()
-              )
-            );
-          }
+          // DO NOT delete RSS feeds from rssList when deleting a media item; preserve user's saved channels/links!
           setPlaylists((prev) =>
             prev.map((pl) => ({
               ...pl,
@@ -2054,10 +2058,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
           // Delete from browser local IndexedDB cache and memory cache
           await deleteIndexedDbMedia(media.id).catch(() => {});
-          if (media.file_url) await deleteIndexedDbMedia(media.file_url).catch(() => {});
-          if ((media as any).local_url) await deleteIndexedDbMedia((media as any).local_url).catch(() => {});
-          if ((media as any).unique_code) await deleteIndexedDbMedia((media as any).unique_code).catch(() => {});
-          if (media.name) await deleteIndexedDbMedia(media.name).catch(() => {});
+          if (media.type === 'image' || media.type === 'video') {
+            if (media.file_url) await deleteIndexedDbMedia(media.file_url).catch(() => {});
+            if ((media as any).local_url) await deleteIndexedDbMedia((media as any).local_url).catch(() => {});
+            if ((media as any).unique_code) await deleteIndexedDbMedia((media as any).unique_code).catch(() => {});
+            if (media.name) await deleteIndexedDbMedia(media.name).catch(() => {});
+          }
 
           // Purge from browser fallback cache so it never resurfaces on reload
           try {
@@ -2067,10 +2073,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               const parsed = JSON.parse(raw);
               if (parsed) {
                 parsed.deleted_media_ids = parsed.deleted_media_ids || [];
-                parsed.deleted_media_ids.push(media.id);
-                if (media.file_url) parsed.deleted_media_ids.push(media.file_url);
-                if ((media as any).unique_code) parsed.deleted_media_ids.push((media as any).unique_code);
-                if (media.name) parsed.deleted_media_ids.push(media.name.toLowerCase());
+                // Dynamic weather widgets are never tombstoned; RSS only records instance ID, never URL
+                if (media.type !== 'weather_clock') {
+                  parsed.deleted_media_ids.push(media.id);
+                }
+                if (media.type === 'image' || media.type === 'video') {
+                  if (media.file_url) parsed.deleted_media_ids.push(media.file_url);
+                  if ((media as any).unique_code) parsed.deleted_media_ids.push((media as any).unique_code);
+                  if (media.name) parsed.deleted_media_ids.push(media.name.toLowerCase());
+                }
                 parsed.media = (parsed.media || []).filter((m: any) => m.id !== media.id);
                 if (parsed.playlists) {
                   for (const pl of parsed.playlists) {
@@ -3582,9 +3593,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     </p>
                     <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 text-xs">
                       {pl.items.map((it, idx) => {
-                        const matchedMedia = mediaList.find((m) => m.id === it.media_id);
-                        const itemName = matchedMedia?.name || it.name || 'Mídia sem nome';
-                        const itemType = matchedMedia?.type || it.type || 'image';
+                        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || (it as any).file_url === 'widget:weather_clock';
+                        const matchedMedia = mediaList.find((m) => m.id === it.media_id) || (isWeather ? mediaList.find((m) => m.type === 'weather_clock') : undefined);
+                        const itemName = matchedMedia?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia sem nome');
+                        const itemType = matchedMedia?.type || it.type || (isWeather ? 'weather_clock' : 'image');
                         const typeLabel =
                           itemType === 'weather_clock'
                             ? 'CLIMA & HORA'
@@ -3597,10 +3609,24 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         return (
                           <div
                             key={it.id || idx}
-                            onClick={() => matchedMedia && setPreviewModalMedia(matchedMedia)}
-                            className={`flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 border border-slate-700/60 px-3 py-2 text-slate-300 ${
-                              matchedMedia ? 'hover:border-slate-600 cursor-pointer transition' : ''
-                            }`}
+                            onClick={() => {
+                              if (matchedMedia) {
+                                setPreviewModalMedia(matchedMedia);
+                              } else if (isWeather) {
+                                setPreviewModalMedia({
+                                  id: 'med-weather-preview',
+                                  company_id: companyInfo?.id || '',
+                                  name: 'Hora Certa & Previsão do Tempo',
+                                  type: 'weather_clock',
+                                  file_url: 'widget:weather_clock',
+                                  duration: it.duration || 12,
+                                  active: true,
+                                  created_at: new Date().toISOString(),
+                                  updated_at: new Date().toISOString(),
+                                });
+                              }
+                            }}
+                            className="flex items-center justify-between gap-2 rounded-lg bg-slate-900/70 border border-slate-700/60 px-3 py-2 text-slate-300 hover:border-slate-600 cursor-pointer transition"
                             title={itemName}
                           >
                             <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -5298,9 +5324,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       </div>
                     ) : (
                       playlistForm.items.map((it, idx) => {
-                        const media = mediaList.find((m) => m.id === it.media_id);
-                        const itemName = media?.name || (it as any).name || 'Mídia sem nome';
-                        const itemType = media?.type || (it as any).type || 'image';
+                        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || (it as any).file_url === 'widget:weather_clock';
+                        const media = mediaList.find((m) => m.id === it.media_id) || (isWeather ? mediaList.find((m) => m.type === 'weather_clock') : undefined);
+                        const itemName = media?.name || (it as any).name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia sem nome');
+                        const itemType = media?.type || (it as any).type || (isWeather ? 'weather_clock' : 'image');
                         return (
                           <div
                             key={idx}
@@ -5310,7 +5337,23 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
                             {/* Media Thumbnail / Icon */}
                             <div
-                              onClick={() => media && setPreviewModalMedia(media)}
+                              onClick={() => {
+                                if (media) {
+                                  setPreviewModalMedia(media);
+                                } else if (isWeather) {
+                                  setPreviewModalMedia({
+                                    id: 'med-weather-preview',
+                                    company_id: companyInfo?.id || '',
+                                    name: 'Hora Certa & Previsão do Tempo',
+                                    type: 'weather_clock',
+                                    file_url: 'widget:weather_clock',
+                                    duration: it.duration || 12,
+                                    active: true,
+                                    created_at: new Date().toISOString(),
+                                    updated_at: new Date().toISOString(),
+                                  });
+                                }
+                              }}
                               className="h-10 w-12 sm:w-14 shrink-0 rounded-lg overflow-hidden bg-slate-950 flex items-center justify-center border border-slate-700 cursor-pointer group hover:border-blue-500 relative transition"
                               title="Clique para pré-visualizar esta mídia"
                             >
@@ -6193,13 +6236,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <>
                   {/* TÍTULO / NOME DA MÍDIA */}
                   <div>
-                    <label className="block font-semibold text-slate-300 mb-1">Título / Nome da Mídia *</label>
+                    <label className="block font-semibold text-slate-300 mb-1">
+                      Título / Nome da Mídia {mediaSourceType === 'weather_clock' ? '(Opcional)' : '*'}
+                    </label>
                     <input
                       type="text"
-                      required
+                      required={mediaSourceType !== 'weather_clock'}
                       value={mediaForm.name}
                       onChange={(e) => setMediaForm({ ...mediaForm, name: e.target.value })}
-                      placeholder="Ex: Notícias Saúde G1, Banner Promoção..."
+                      placeholder={mediaSourceType === 'weather_clock' ? 'Hora Certa & Previsão do Tempo' : 'Ex: Notícias Saúde G1, Banner Promoção...'}
                       className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
                     />
                   </div>
