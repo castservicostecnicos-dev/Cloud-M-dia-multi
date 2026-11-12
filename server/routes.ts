@@ -1157,7 +1157,21 @@ apiRouter.get('/company/stats', requireAuth, requireRole('company'), (req: Authe
   const now = Date.now();
 
   const company = data.companies.find((c) => c.id === companyId);
-  const plan = data.plans.find((p) => p.id === company?.plan_id);
+  let plan = data.plans.find((p) => p.id === company?.plan_id);
+  if (!plan) {
+    plan = data.plans.find((p) => (company as any)?.plan_name && p.name.toLowerCase() === (company as any).plan_name.toLowerCase()) || {
+      id: company?.plan_id || 'plan-especial-corp',
+      name: 'Especial Corporativo',
+      description: 'Plano corporativo sob medida com proporção livre de telas e operadores.',
+      max_players: company?.max_players || 4,
+      max_operators: company?.max_operators || 25,
+      max_storage: company?.max_media || 400,
+      monthly_price: 189,
+      active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
 
   const players = data.players.filter((p) => p.company_id === companyId);
   const activePlayers = players.filter((p) => p.status === 'active');
@@ -1180,7 +1194,9 @@ apiRouter.get('/company/stats', requireAuth, requireRole('company'), (req: Authe
     operatorsCount: operators.length,
     playlistsCount: playlists.length,
     mediaCount: media.length,
-    plan: plan || null,
+    plan: plan,
+    company: company,
+    plan_name: plan.name,
     drive_folder_url: company?.drive_folder_url || null,
     drive_folder_id: company?.drive_folder_id || null,
     limits: {
@@ -1188,6 +1204,14 @@ apiRouter.get('/company/stats', requireAuth, requireRole('company'), (req: Authe
       max_operators: (company?.max_operators !== undefined && company.max_operators !== null) ? company.max_operators : (plan?.max_operators || 0),
       max_media: (company?.max_media !== undefined && company.max_media !== null) ? company.max_media : (plan?.max_media || plan?.max_storage || 20),
       max_storage: (company?.max_media !== undefined && company.max_media !== null) ? company.max_media : (plan?.max_storage || 20),
+    },
+    counts: {
+      players: players.length,
+      online_players: onlinePlayers.length,
+      operators: operators.length,
+      playlists: playlists.length,
+      active_playlists: playlists.filter((pl) => pl.active).length,
+      media: media.length,
     },
   });
 });

@@ -278,6 +278,8 @@ export interface CompanyStats {
   playlistsCount: number;
   mediaCount: number;
   plan: Plan | null;
+  company?: Company;
+  plan_name?: string;
   drive_folder_url?: string;
   drive_folder_id?: string;
   limits: {

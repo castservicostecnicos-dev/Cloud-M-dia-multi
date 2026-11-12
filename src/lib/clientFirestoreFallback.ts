@@ -839,30 +839,56 @@ export async function handleClientFallbackRequest(
 
   if (pathOnly === '/company/stats' && method === 'GET') {
     const comp = (dbData.companies || []).find((c: any) => c.id === activeCompanyId) || dbData.companies?.[0];
-    const plan = (dbData.plans || DEFAULT_DB.plans).find((p: any) => p.id === comp?.plan_id);
+    const allPlans = (dbData.plans && dbData.plans.length > 0) ? dbData.plans : (DEFAULT_DB.plans || []);
+    const plan = allPlans.find((p: any) => p.id === comp?.plan_id) || allPlans.find((p: any) => p.name === comp?.plan_name) || {
+      id: comp?.plan_id || 'plan-especial-corp',
+      name: 'Especial Corporativo',
+      description: 'Plano corporativo sob medida com proporção livre de telas e operadores.',
+      monthly_price: 189,
+      max_players: comp?.max_players || 4,
+      max_operators: comp?.max_operators || 25,
+      max_storage: comp?.max_media || 400,
+      max_media: comp?.max_media || 400,
+      active: true,
+    };
     const compPlayers = (dbData.players || []).filter((p: any) => p.company_id === activeCompanyId);
+    const activePlayers = compPlayers.filter((p: any) => p.status === 'active');
+    const onlinePlayers = compPlayers.filter((p: any) => {
+      const lastSeenTime = p.last_seen ? new Date(p.last_seen).getTime() : 0;
+      return p.status === 'active' && lastSeenTime > 0 && Date.now() - lastSeenTime <= 45000;
+    });
     const compOps = (dbData.operators || []).filter((o: any) => o.company_id === activeCompanyId);
     const compPlaylists = (dbData.playlists || []).filter((p: any) => p.company_id === activeCompanyId);
     const compMedia = (dbData.media || []).filter((m: any) => m.company_id === activeCompanyId);
+    const compStores = (dbData.company_stores || dbData.stores || []).filter((s: any) => s.company_id === activeCompanyId);
     const maxMedia =
       comp?.max_media !== undefined && comp.max_media !== null
         ? Number(comp.max_media)
         : (plan?.max_media || plan?.max_storage || 250);
+
     return {
+      storesCount: compStores.length,
+      is_network: Boolean(comp?.is_network || compStores.length > 0),
+      playersCount: compPlayers.length,
+      activePlayersCount: activePlayers.length,
+      onlinePlayersCount: onlinePlayers.length,
+      operatorsCount: compOps.length,
+      playlistsCount: compPlaylists.length,
+      mediaCount: compMedia.length,
+      plan: plan,
       company: comp,
-      plan_name: plan?.name || 'Plano Corporativo',
+      plan_name: plan?.name || 'Especial Corporativo',
+      drive_folder_url: comp?.drive_folder_url || null,
+      drive_folder_id: comp?.drive_folder_id || null,
       limits: {
-        max_players: comp?.custom_max_players ?? plan?.max_players ?? 10,
-        max_operators: comp?.custom_max_operators ?? plan?.max_operators ?? 10,
+        max_players: comp?.max_players ?? comp?.custom_max_players ?? plan?.max_players ?? 10,
+        max_operators: comp?.max_operators ?? comp?.custom_max_operators ?? plan?.max_operators ?? 25,
         max_media: maxMedia,
         max_storage: maxMedia,
       },
       counts: {
         players: compPlayers.length,
-        online_players: compPlayers.filter((p: any) => {
-          const lastSeenTime = p.last_seen ? new Date(p.last_seen).getTime() : 0;
-          return p.status === 'active' && lastSeenTime > 0 && Date.now() - lastSeenTime <= 45000;
-        }).length,
+        online_players: onlinePlayers.length,
         operators: compOps.length,
         playlists: compPlaylists.length,
         active_playlists: compPlaylists.filter((p: any) => p.active).length,

@@ -870,10 +870,40 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         api.getCompanyMedia(),
         api.getCompanyRss(),
       ]);
-      setStats(s);
+      const opsList = Array.isArray(op) ? op : [];
+      const playersList = Array.isArray(pl) ? pl : [];
+      const enrichedStats: CompanyStats = {
+        ...s,
+        operatorsCount: s?.operatorsCount ?? (s as any)?.counts?.operators ?? opsList.length,
+        playersCount: s?.playersCount ?? (s as any)?.counts?.players ?? playersList.length,
+        activePlayersCount: s?.activePlayersCount ?? playersList.filter((p) => p.status === 'active').length,
+        onlinePlayersCount: s?.onlinePlayersCount ?? (s as any)?.counts?.online_players ?? 0,
+        playlistsCount: s?.playlistsCount ?? (s as any)?.counts?.playlists ?? (Array.isArray(py) ? py.length : 0),
+        mediaCount: s?.mediaCount ?? (s as any)?.counts?.media ?? (Array.isArray(md) ? md.length : 0),
+        plan: s?.plan || {
+          id: (s as any)?.company?.plan_id || 'plan-especial-corp',
+          name: (s as any)?.plan_name || 'Especial Corporativo',
+          description: 'Plano corporativo sob medida com proporção livre de telas e operadores.',
+          max_players: s?.limits?.max_players || 4,
+          max_operators: s?.limits?.max_operators || 25,
+          max_storage: s?.limits?.max_media || 400,
+          max_media: s?.limits?.max_media || 400,
+          monthly_price: 189,
+          active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        limits: s?.limits || {
+          max_players: (s as any)?.company?.max_players || 4,
+          max_operators: (s as any)?.company?.max_operators || 25,
+          max_storage: (s as any)?.company?.max_media || 400,
+          max_media: (s as any)?.company?.max_media || 400,
+        },
+      };
+      setStats(enrichedStats);
       setStores(Array.isArray(st) ? st : []);
-      setPlayers(Array.isArray(pl) ? pl : []);
-      setOperators(Array.isArray(op) ? op : []);
+      setPlayers(playersList);
+      setOperators(opsList);
       setPlaylists(Array.isArray(py) ? py : []);
       setMediaList(Array.isArray(md) ? md : []);
       setRssList(Array.isArray(rs) ? rs : []);
@@ -2332,12 +2362,20 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-700 pb-5 mb-6">
         <div>
           <h2 className="text-xl font-bold text-white tracking-tight uppercase">Painel da Empresa</h2>
-          {stores.length > 0 && (
-            <p className="text-xs text-indigo-300 mt-0.5 flex items-center gap-1.5">
-              <GitBranch className="h-3.5 w-3.5 text-indigo-400" />
-              <span>Rede Multi-Lojas ({stores.length} {stores.length === 1 ? 'unidade cadastrada' : 'unidades cadastradas'})</span>
-            </p>
-          )}
+          <div className="flex flex-wrap items-center gap-2.5 mt-1">
+            {stores.length > 0 && (
+              <p className="text-xs text-indigo-300 flex items-center gap-1.5">
+                <GitBranch className="h-3.5 w-3.5 text-indigo-400" />
+                <span>Rede Multi-Lojas ({stores.length} {stores.length === 1 ? 'unidade' : 'unidades'})</span>
+              </p>
+            )}
+            {stats && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-300 bg-blue-950/70 border border-blue-800/60 px-2.5 py-0.5 rounded-full shadow-xs">
+                <span>Plano: {stats.plan?.name || (stats as any)?.plan_name || 'Especial Corporativo'}</span>
+                <span className="text-blue-400 font-bold">• R$ {Number(stats.plan?.monthly_price || (stats.plan as any)?.price || 189).toFixed(2)}/mês</span>
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Sub-tabs com quebra responsiva em grade para mobile (sem deslocamento lateral) */}
@@ -2524,11 +2562,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             <div className="rounded-xl border border-slate-700 bg-slate-800 p-5 shadow-sm">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                  Operadores
+                  Operadores Cadastrados
                 </span>
                 <Users className="h-4 w-4 text-emerald-400" />
               </div>
-              <p className="mt-2 text-2xl font-bold text-white tracking-tight">{stats.operatorsCount}</p>
+              <p className="mt-2 text-2xl font-bold text-white tracking-tight">
+                {stats.operatorsCount !== undefined && stats.operatorsCount !== null
+                  ? stats.operatorsCount
+                  : operators.length}
+                <span className="text-xs font-normal text-slate-400 ml-1.5">
+                  / {stats.limits?.max_operators === 0 ? 'Sem limite' : (stats.limits?.max_operators || operators.length || 25)} limite
+                </span>
+              </p>
             </div>
 
             <div className="rounded-xl border border-slate-700 bg-slate-800 p-5 shadow-sm">
@@ -2557,11 +2602,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  Plano: {stats.plan?.name || 'Personalizado'}
+                  Plano: {stats.plan?.name || (stats as any)?.plan_name || 'Especial Corporativo'}
                 </h3>
               </div>
-              <span className="text-xs font-bold uppercase tracking-wider text-blue-400 bg-blue-950/60 px-3 py-1 rounded-full border border-blue-800/80">
-                R$ {Number(stats.plan?.monthly_price || 0).toFixed(2)}/mês
+              <span className="text-xs font-bold uppercase tracking-wider text-blue-400 bg-blue-950/60 px-3 py-1 rounded-full border border-blue-800/80 shadow-xs">
+                R$ {Number(stats.plan?.monthly_price || (stats.plan as any)?.price || 189).toFixed(2)}/mês
               </span>
             </div>
 
@@ -2578,7 +2623,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <div
                     className="h-full bg-blue-500 rounded-full"
                     style={{
-                      width: `${Math.min(100, (stats.playersCount / stats.limits.max_players) * 100)}%`,
+                      width: `${Math.min(100, (stats.playersCount / Math.max(1, stats.limits.max_players)) * 100)}%`,
                     }}
                   />
                 </div>
@@ -2587,12 +2632,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               {/* Operators limit */}
               <div>
                 <div className="flex justify-between text-xs mb-1.5">
-                  <span className="text-slate-400 font-bold uppercase text-[10px] tracking-wider">Operadores de Atendimento</span>
+                  <span className="text-slate-400 font-bold uppercase text-[10px] tracking-wider">Operadores Cadastrados</span>
                   <span className="font-semibold text-white">
                     {stats.limits.max_operators === 0 ? (
                       <span className="text-amber-400 font-bold text-[10px] uppercase">Não incluído (Linha Show)</span>
                     ) : (
-                      `${stats.operatorsCount} / ${stats.limits.max_operators}`
+                      `${stats.operatorsCount !== undefined && stats.operatorsCount !== null ? stats.operatorsCount : operators.length} / ${stats.limits.max_operators || operators.length || 25}`
                     )}
                   </span>
                 </div>
@@ -2600,7 +2645,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   <div
                     className={`h-full rounded-full ${stats.limits.max_operators === 0 ? 'bg-amber-500/30' : 'bg-emerald-500'}`}
                     style={{
-                      width: stats.limits.max_operators === 0 ? '0%' : `${Math.min(100, (stats.operatorsCount / Math.max(1, stats.limits.max_operators)) * 100)}%`,
+                      width: stats.limits.max_operators === 0 ? '0%' : `${Math.min(100, ((stats.operatorsCount !== undefined && stats.operatorsCount !== null ? stats.operatorsCount : operators.length) / Math.max(1, stats.limits.max_operators || operators.length || 25)) * 100)}%`,
                     }}
                   />
                 </div>
@@ -3258,7 +3303,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold uppercase tracking-wider text-white">Operadores</h3>
+              <h3 className="text-sm font-bold uppercase tracking-wider text-white">
+                Operadores Cadastrados ({operators.length}{stats.limits.max_operators ? ` / limite: ${stats.limits.max_operators}` : ''})
+              </h3>
             </div>
             <button
               onClick={() => handleOpenOperatorModal()}
