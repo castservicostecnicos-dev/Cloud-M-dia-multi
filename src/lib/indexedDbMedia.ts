@@ -28,6 +28,22 @@ function getClientFirestore() {
 const memoryCache = new Map<string, string>();
 const activeCloudFetches = new Map<string, Promise<string | null>>();
 
+let cloudMediaQuotaBlockedUntil = 0;
+function isCloudMediaQuotaBlocked(): boolean {
+  return Date.now() < cloudMediaQuotaBlockedUntil;
+}
+function handleCloudMediaQuotaError(err: any) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (
+    msg.includes('quota exceeded') ||
+    msg.includes('quota limit exceeded') ||
+    msg.includes('free daily read units') ||
+    msg.includes('resource_exhausted')
+  ) {
+    cloudMediaQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+  }
+}
+
 function sanitizeDocKey(filename: string): string {
   return filename.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
 }
@@ -132,6 +148,7 @@ export async function saveIndexedDbMedia(id: string, dataUrl: string, secondaryF
 }
 
 export async function saveMediaBinaryToFirestoreCloud(keyOrId: string, dataUrl: string): Promise<boolean> {
+  if (isCloudMediaQuotaBlocked()) return false;
   try {
     if (!dataUrl || !dataUrl.startsWith('data:')) return false;
     const cleanKey = sanitizeDocKey(keyOrId.replace(/^idb:/, '').replace(/^\/uploads\//, ''));
@@ -174,12 +191,13 @@ export async function saveMediaBinaryToFirestoreCloud(keyOrId: string, dataUrl: 
 
     return true;
   } catch (err: any) {
-    console.warn('[Cloud Sync] Não foi possível salvar chunk da mídia no Firestore:', err?.message || err);
+    handleCloudMediaQuotaError(err);
     return false;
   }
 }
 
 export async function fetchMediaBinaryFromFirestoreCloud(keyOrIdOrMedia: any): Promise<string | null> {
+  if (isCloudMediaQuotaBlocked()) return null;
   const candidates = getMediaCandidateKeys(keyOrIdOrMedia);
   if (candidates.length === 0) return null;
 
@@ -207,7 +225,10 @@ export async function fetchMediaBinaryFromFirestoreCloud(keyOrIdOrMedia: any): P
               break;
             }
           }
-        } catch {}
+        } catch (fetchCandidateErr) {
+          handleCloudMediaQuotaError(fetchCandidateErr);
+          if (isCloudMediaQuotaBlocked()) break;
+        }
       }
 
       if (!foundMeta || !matchedKey) {
@@ -242,7 +263,7 @@ export async function fetchMediaBinaryFromFirestoreCloud(keyOrIdOrMedia: any): P
 
       return dataUrl;
     } catch (err: any) {
-      console.warn('[Cloud Sync] Erro ao recuperar mídia do Firestore Cloud:', err?.message || err);
+      handleCloudMediaQuotaError(err);
       return null;
     } finally {
       activeCloudFetches.delete(primaryKey);

@@ -39,7 +39,43 @@ export type FirestoreLoadResult =
   | { status: 'found'; data: any }
   | { status: 'not_found' }
   | { status: 'error'; error: string }
-  | { status: 'unconfigured' };
+  | { status: 'unconfigured' }
+  | { status: 'quota_exceeded'; error: string };
+
+let quotaExceeded = false;
+let quotaExceededCooldownUntil = 0;
+const QUOTA_COOLDOWN_MS = 15 * 60 * 1000; // 15-minute backoff before rechecking cloud
+
+export function isQuotaExceededError(err: any): boolean {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return (
+    msg.includes('quota exceeded') ||
+    msg.includes('quota limit exceeded') ||
+    msg.includes('free daily read units') ||
+    msg.includes('resource_exhausted')
+  );
+}
+
+export function markQuotaExceeded(reason: string) {
+  const wasExceeded = quotaExceeded;
+  quotaExceeded = true;
+  quotaExceededCooldownUntil = Date.now() + QUOTA_COOLDOWN_MS;
+  lastSyncError = reason;
+  if (!wasExceeded) {
+    console.log(
+      `[Firebase Firestore] Quota limit reached for free tier database. Pausing cloud calls; local persistence is 100% active.`
+    );
+  }
+}
+
+export function isQuotaBlocked(): boolean {
+  if (!quotaExceeded) return false;
+  if (Date.now() > quotaExceededCooldownUntil) {
+    quotaExceeded = false;
+    return false;
+  }
+  return true;
+}
 
 const PRIMARY_FIRESTORE_CONFIG: FirebaseConfigShape = {
   projectId: 'deep-freedom-8szp9',
@@ -126,6 +162,13 @@ export const FIRESTORE_DOCUMENT_ID =
  * Load database snapshot from Firebase Firestore with explicit status
  */
 export async function loadDatabaseFromFirestore(): Promise<FirestoreLoadResult> {
+  if (isQuotaBlocked()) {
+    return {
+      status: 'quota_exceeded',
+      error: 'Firestore daily free tier quota reached. Seamlessly using local database.',
+    };
+  }
+
   const db = getFirestoreDb();
   if (!db) {
     return { status: 'unconfigured' };
@@ -147,7 +190,6 @@ export async function loadDatabaseFromFirestore(): Promise<FirestoreLoadResult> 
 
     const docData = snap.data();
     if (!docData || !docData.data) {
-      console.warn('[Firebase Firestore] Snapshot document is empty.');
       return { status: 'not_found' };
     }
 
@@ -157,7 +199,11 @@ export async function loadDatabaseFromFirestore(): Promise<FirestoreLoadResult> 
     return { status: 'found', data: parsed };
   } catch (err: any) {
     const msg = err?.message || String(err);
-    console.warn('[Firebase Firestore] Cloud read skipped or failed (using local database):', msg);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(msg);
+      return { status: 'quota_exceeded', error: msg };
+    }
+    console.warn('[Firebase Firestore] Cloud read skipped (using local database):', msg);
     lastSyncError = msg;
     return { status: 'error', error: msg };
   }
@@ -167,6 +213,10 @@ export async function loadDatabaseFromFirestore(): Promise<FirestoreLoadResult> 
  * Save database snapshot directly to Firebase Firestore
  */
 export async function saveDatabaseToFirestoreNow(data: any): Promise<boolean> {
+  if (isQuotaBlocked()) {
+    return false;
+  }
+
   const db = getFirestoreDb();
   if (!db) return false;
 
@@ -207,7 +257,11 @@ export async function saveDatabaseToFirestoreNow(data: any): Promise<boolean> {
     return true;
   } catch (err: any) {
     const errMsg = err?.message || String(err);
-    console.warn('[Firebase Firestore] Cloud sync skipped or failed (local persistence remains active):', errMsg);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(errMsg);
+      return false;
+    }
+    console.warn('[Firebase Firestore] Cloud sync skipped (local persistence remains active):', errMsg);
     lastSyncError = errMsg;
     return false;
   }
@@ -256,6 +310,11 @@ export function getFirestoreSyncStatus() {
     lastSyncError,
     isSyncing,
     isSyncEnabled,
+    quotaExceeded: isQuotaBlocked(),
+    quotaResetNotice:
+      'A quota gratuita de leituras diárias do Firestore atingiu o limite e será reiniciada no próximo ciclo diário. O sistema continua 100% ativo via banco local e cache.',
+    quotaUpgradeUrl:
+      'https://console.firebase.google.com/project/deep-freedom-8szp9/firestore/databases/ai-studio-remixmdiaindoor2-b21786e5-9cc2-4541-8854-9ca7fb6c84ba/data?openUpgradeDialog=true',
   };
 }
 
@@ -271,6 +330,7 @@ export async function saveMediaBinaryToFirestore(
   mimeType: string,
   buffer: Buffer
 ): Promise<boolean> {
+  if (isQuotaBlocked()) return false;
   const db = getFirestoreDb();
   if (!db) return false;
 
@@ -308,7 +368,9 @@ export async function saveMediaBinaryToFirestore(
 
     return true;
   } catch (err: any) {
-    console.warn('[Firebase Firestore] Could not backup media binary to cloud:', err?.message || err);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(err?.message || 'Quota exceeded');
+    }
     return false;
   }
 }
@@ -317,6 +379,7 @@ export async function saveMediaBinaryToFirestore(
  * Restore uploaded media binary from Firestore chunks if missing from local /uploads after a deploy
  */
 export async function loadMediaBinaryFromFirestore(filename: string): Promise<Buffer | null> {
+  if (isQuotaBlocked()) return null;
   const db = getFirestoreDb();
   if (!db) return null;
 
@@ -340,7 +403,9 @@ export async function loadMediaBinaryFromFirestore(filename: string): Promise<Bu
 
     return Buffer.from(parts.join(''), 'base64');
   } catch (err: any) {
-    console.warn('[Firebase Firestore] Failed to restore media binary from cloud:', err?.message || err);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(err?.message || 'Quota exceeded');
+    }
     return null;
   }
 }
@@ -349,6 +414,7 @@ export async function loadMediaBinaryFromFirestore(filename: string): Promise<Bu
  * Permanently delete media binary and metadata from Firestore cloud chunks
  */
 export async function deleteMediaBinaryFromFirestore(keyOrId: string): Promise<boolean> {
+  if (isQuotaBlocked()) return false;
   const db = getFirestoreDb();
   if (!db || !keyOrId) return false;
 
@@ -376,7 +442,9 @@ export async function deleteMediaBinaryFromFirestore(keyOrId: string): Promise<b
 
     return true;
   } catch (err: any) {
-    console.warn('[Firebase Firestore] Failed to delete media binary from cloud:', err?.message || err);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(err?.message || 'Quota exceeded');
+    }
     return false;
   }
 }

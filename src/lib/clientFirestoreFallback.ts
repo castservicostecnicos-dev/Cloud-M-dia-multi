@@ -302,6 +302,22 @@ async function fetchFirestoreDocumentViaRest(): Promise<any | null> {
   return null;
 }
 
+let clientQuotaBlockedUntil = 0;
+function isClientQuotaBlocked(): boolean {
+  return Date.now() < clientQuotaBlockedUntil;
+}
+function markClientQuotaExceeded(err: any) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (
+    msg.includes('quota exceeded') ||
+    msg.includes('quota limit exceeded') ||
+    msg.includes('free daily read units') ||
+    msg.includes('resource_exhausted')
+  ) {
+    clientQuotaBlockedUntil = Date.now() + 15 * 60 * 1000;
+  }
+}
+
 async function loadCloudDb(forceRefresh = false): Promise<any> {
   if (cachedDb && (cachedDb.companies?.length || 0) > 0 && !forceRefresh && Date.now() - lastLoadedAt < 5000) {
     return cachedDb;
@@ -318,6 +334,14 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
         }
       }
     } catch {}
+  }
+
+  // If client quota was exceeded, bypass cloud read and stay on local cache
+  if (isClientQuotaBlocked()) {
+    if (!cachedDb || !cachedDb.companies || cachedDb.companies.length === 0) {
+      cachedDb = normalizeDbShape(JSON.parse(JSON.stringify(DEFAULT_DB)));
+    }
+    return cachedDb;
   }
 
   // 2. Load from Firestore Lite with strict 4s timeout (pure HTTP REST, zero WebSocket hanging)
@@ -343,22 +367,26 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
         return cachedDb;
       }
     }
-  } catch (err) {
-    console.warn('[ClientFallback] Firestore Lite getDoc notice:', err);
-    // 3. Fallback to direct REST HTTP fetch
-    try {
-      const restData = await fetchFirestoreDocumentViaRest();
-      if (restData) {
-        cachedDb = normalizeDbShape(restData);
-        lastLoadedAt = Date.now();
-        try {
-          if ((cachedDb.companies?.length || 0) > 0) {
-            localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(createCleanLightweightDb(cachedDb)));
-          }
-        } catch {}
-        return cachedDb;
+  } catch (err: any) {
+    markClientQuotaExceeded(err);
+    if (!isClientQuotaBlocked()) {
+      // 3. Fallback to direct REST HTTP fetch only if not blocked by quota
+      try {
+        const restData = await fetchFirestoreDocumentViaRest();
+        if (restData) {
+          cachedDb = normalizeDbShape(restData);
+          lastLoadedAt = Date.now();
+          try {
+            if ((cachedDb.companies?.length || 0) > 0) {
+              localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(createCleanLightweightDb(cachedDb)));
+            }
+          } catch {}
+          return cachedDb;
+        }
+      } catch (restErr) {
+        markClientQuotaExceeded(restErr);
       }
-    } catch {}
+    }
   }
 
   if (!cachedDb || !cachedDb.companies || cachedDb.companies.length === 0) {
@@ -435,23 +463,25 @@ async function saveCloudDb(dbData: any): Promise<void> {
     console.warn('[ClientFallback] Notice writing to localStorage:', err);
   }
 
-  try {
-    const fs = getClientFirestore();
-    await setDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID), {
-      version: 1,
-      updated_at: new Date().toISOString(),
-      stats: {
-        users: dbData.users?.length || 0,
-        companies: dbData.companies?.length || 0,
-        company_stores: dbData.company_stores?.length || 0,
-        players: dbData.players?.length || 0,
-        playlists: dbData.playlists?.length || 0,
-        media: dbData.media?.length || 0,
-      },
-      data: serialized,
-    });
-  } catch (err) {
-    console.warn('[ClientFallback] Error saving to Firestore:', err);
+  if (!isClientQuotaBlocked()) {
+    try {
+      const fs = getClientFirestore();
+      await setDoc(doc(fs, COLLECTION_NAME, DOCUMENT_ID), {
+        version: 1,
+        updated_at: new Date().toISOString(),
+        stats: {
+          users: dbData.users?.length || 0,
+          companies: dbData.companies?.length || 0,
+          company_stores: dbData.company_stores?.length || 0,
+          players: dbData.players?.length || 0,
+          playlists: dbData.playlists?.length || 0,
+          media: dbData.media?.length || 0,
+        },
+        data: serialized,
+      });
+    } catch (err: any) {
+      markClientQuotaExceeded(err);
+    }
   }
 }
 

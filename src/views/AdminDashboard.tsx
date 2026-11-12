@@ -351,6 +351,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     lastSyncTimestamp: string | null;
     lastSyncError: string | null;
     isSyncing: boolean;
+    quotaExceeded?: boolean;
+    quotaResetNotice?: string;
+    quotaUpgradeUrl?: string;
   } | null>(null);
   const [isSyncingFirestore, setIsSyncingFirestore] = useState(false);
 
@@ -1115,6 +1118,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Quota Exceeded Informational Banner */}
+      {firestoreStatus?.quotaExceeded && (
+        <div className="mb-6 rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 text-amber-200 text-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-100">
+                Aviso de Quota do Firebase Firestore (Plano Gratuito)
+              </p>
+              <p className="text-xs text-amber-300/90 mt-0.5">
+                {firestoreStatus.quotaResetNotice ||
+                  'O limite diário de leituras gratuitas do Firestore foi atingido e será redefinido no próximo ciclo diário. O aplicativo continua 100% operacional utilizando a persistência em banco local.'}
+              </p>
+            </div>
+          </div>
+          {firestoreStatus.quotaUpgradeUrl && (
+            <a
+              href={firestoreStatus.quotaUpgradeUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold shrink-0 transition"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span>Ver no Firebase Console</span>
+            </a>
+          )}
+        </div>
+      )}
 
       {/* VIEW: DASHBOARD MINIMALISTA */}
       {activeTab === 'dashboard' && (

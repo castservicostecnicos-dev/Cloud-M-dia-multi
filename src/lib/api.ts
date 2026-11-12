@@ -165,6 +165,9 @@ export const api = {
       lastSyncTimestamp: string | null;
       lastSyncError: string | null;
       isSyncing: boolean;
+      quotaExceeded?: boolean;
+      quotaResetNotice?: string;
+      quotaUpgradeUrl?: string;
     }>('/admin/firestore/status'),
   syncFirestore: () =>
     request<{

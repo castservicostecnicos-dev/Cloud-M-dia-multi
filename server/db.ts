@@ -1115,10 +1115,12 @@ class DatabaseStore {
       } else if (res.status === 'not_found') {
         console.log('[DatabaseStore] No prior Firestore document found. Initializing Firestore with current database...');
         await saveDatabaseToFirestoreNow(this.data);
+      } else if (res.status === 'quota_exceeded') {
+        console.log('[DatabaseStore] Firestore daily read quota reached for free tier. Operating with local high-performance storage.');
       } else if (res.status === 'error') {
-        console.error('[DatabaseStore] Network or auth error reading Firestore. Retaining local data without cloud overwrite.');
+        console.warn('[DatabaseStore] Cloud read unavailable. Operating in local database mode.');
       } else if (res.status === 'unconfigured') {
-        console.warn('[DatabaseStore] Firestore credentials not provided. Running in local-disk mode only.');
+        console.log('[DatabaseStore] Firestore credentials not provided. Running in local-disk mode.');
       }
     } catch (err) {
       console.warn('[DatabaseStore] Initial Firestore sync warning:', err);
