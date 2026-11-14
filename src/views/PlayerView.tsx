@@ -63,6 +63,7 @@ interface CurrentPlayerData {
   playlist: {
     id: string;
     name: string;
+    updated_at?: string;
     weather_city?: string;
     transition_effect?: 'crossfade' | 'slide' | 'zoom' | 'cut';
     transition_duration?: number;
@@ -80,6 +81,8 @@ interface CurrentPlayerData {
     name: string;
     type: 'image' | 'video' | 'rss' | 'weather_clock';
     file_url: string;
+    r2_url?: string;
+    local_url?: string;
     schedule_enabled?: boolean;
     schedule_days?: number[];
     schedule_start_time?: string;
@@ -90,6 +93,7 @@ interface CurrentPlayerData {
     is_muted?: boolean;
   }>;
   rssFeeds: Array<{ id: string; name: string; url: string; active: boolean }>;
+  syncVersion?: string;
 }
 
 interface ActiveCall {
@@ -103,6 +107,35 @@ interface ActiveCall {
 function resolveMediaUrl(url: string | undefined): string {
   if (!url) return '';
   return resolveMediaDisplayUrl(url);
+}
+
+function resolveVideoPlaybackUrl(item: CurrentPlayerData['items'][0] | null): string {
+  if (!item) return '';
+  const r2Url = item.r2_url;
+  if (r2Url && typeof r2Url === 'string' && r2Url.startsWith('http') && !r2Url.includes('drive.google.com')) {
+    return r2Url;
+  }
+  if (item.file_url && item.file_url.startsWith('http') && !item.file_url.includes('drive.google.com')) {
+    return item.file_url;
+  }
+  if (item.local_url && item.local_url.startsWith('/uploads/')) {
+    return item.local_url;
+  }
+  if (item.media_id || item.id) {
+    return `${API_BASE_URL}/media/stream/${item.media_id || item.id}`;
+  }
+  return resolveMediaUrl(item.file_url);
+}
+
+function buildClientSyncFingerprint(payload: CurrentPlayerData | null): string {
+  if (!payload) return '';
+  if (payload.syncVersion) return payload.syncVersion;
+  return JSON.stringify({
+    p: payload.player,
+    pl: payload.playlist,
+    items: payload.items,
+    rss: payload.rssFeeds,
+  });
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCode, overridePlayerToken }) => {
@@ -120,18 +153,57 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
   const [orientation, setOrientation] = useState<PlayerOrientation>('horizontal');
   const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [playCycle, setPlayCycle] = useState(0);
+  const [autoplayMuted, setAutoplayMuted] = useState(false);
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [callRemaining, setCallRemaining] = useState<number>(0);
   const [isSpeakingCall, setIsSpeakingCall] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const [restartNotification, setRestartNotification] = useState<{ message: string; timestamp: number } | null>(null);
-  const lastRestartTsRef = useRef<number>(0);
+
+  const dataRef = useRef<CurrentPlayerData | null>(null);
+  const syncVersionRef = useRef<string>('');
+  const handledRestartKeysRef = useRef<Set<string>>(new Set());
+  const autoplayMutedRef = useRef<boolean>(false);
+  const activeSlideKeyRef = useRef<string>('');
+  const slideStartedAtRef = useRef<number>(Date.now());
+  const currentMediaRef = useRef<CurrentPlayerData['items'][0] | null>(null);
+  const triedVideoFallbacksRef = useRef<Set<string>>(new Set());
+
+  // Purge any previously cached opaque (status 0) responses in Workbox caches so HTTP Range requests for videos never break
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('caches' in window)) return;
+    const purgeOpaqueEntries = async () => {
+      for (const cacheName of ['indoor-media-videos-v1', 'indoor-media-images-v1']) {
+        try {
+          const cache = await caches.open(cacheName);
+          const keys = await cache.keys();
+          for (const req of keys) {
+            const resp = await cache.match(req);
+            if (!resp || resp.type === 'opaque' || resp.status === 0) {
+              await cache.delete(req);
+            }
+          }
+        } catch {}
+      }
+    };
+    purgeOpaqueEntries();
+  }, []);
 
   // Ensure audio and speech synthesis are unlocked on user gesture / interaction
   useEffect(() => {
     const handleGesture = () => {
       unlockAudio();
+      if (autoplayMutedRef.current && videoRef.current) {
+        const masterMuted = Boolean(dataRef.current?.player?.master_muted);
+        const itemMuted = Boolean(currentMediaRef.current?.is_muted);
+        if (!masterMuted && !itemMuted) {
+          videoRef.current.muted = false;
+          autoplayMutedRef.current = false;
+          setAutoplayMuted(false);
+        }
+      }
     };
     window.addEventListener('click', handleGesture, { passive: true });
     window.addEventListener('touchstart', handleGesture, { passive: true });
@@ -253,7 +325,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     };
   }, []);
 
-  // Pre-cache media assets into Cache Storage via Service Worker
+  // Pre-cache non-opaque media assets (never store opaque status-0 video responses in Cache Storage)
   const precachePlaylistAssets = async (mediaItems?: CurrentPlayerData['items']) => {
     if (!mediaItems || mediaItems.length === 0) return;
     setCacheSyncStatus('syncing');
@@ -261,35 +333,35 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
 
     try {
       const hasCaches = typeof window !== 'undefined' && 'caches' in window;
-      const videoCache = hasCaches ? await caches.open('indoor-media-videos-v1').catch(() => null) : null;
       const imageCache = hasCaches ? await caches.open('indoor-media-images-v1').catch(() => null) : null;
 
       for (const item of mediaItems) {
-        if (!item.file_url) continue;
+        const assetUrl = item.r2_url || item.file_url;
+        if (!assetUrl || assetUrl.startsWith('widget:') || assetUrl.startsWith('idb:')) continue;
 
-        // Data URLs are already local and require no network
-        if (item.file_url.startsWith('data:')) {
+        if (assetUrl.startsWith('data:')) {
+          count++;
+          continue;
+        }
+
+        // Videos stream directly via HTTP 206 Range requests; avoid pre-fetching multi-MB blobs that compete with <video> buffering
+        if (item.type === 'video') {
           count++;
           continue;
         }
 
         try {
-          if (hasCaches) {
-            const targetCache = item.type === 'video' ? videoCache : imageCache;
-            if (targetCache) {
-              const matched = await targetCache.match(item.file_url);
-              if (!matched) {
-                // Fetch through browser/service worker to warm the CacheFirst route
-                const response = await fetch(item.file_url, { mode: 'no-cors' });
-                if (response && response.type !== 'error') {
-                  await targetCache.put(item.file_url, response.clone());
-                }
+          if (hasCaches && imageCache && item.type === 'image') {
+            const matched = await imageCache.match(assetUrl);
+            if (!matched) {
+              const response = await fetch(assetUrl, { mode: 'cors' });
+              if (response && response.ok && response.status === 200) {
+                await imageCache.put(assetUrl, response.clone());
               }
             }
           }
           count++;
-        } catch (itemErr) {
-          // Continue caching other assets if one fails
+        } catch {
           count++;
         }
       }
@@ -333,8 +405,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     }
   };
 
-  // Fetch player configuration with robust offline fallback
-  const loadPlayerData = async () => {
+  // Fetch player configuration with robust offline fallback & zero-flicker silent updates
+  const loadPlayerData = async (options?: { silent?: boolean; explicitRestart?: boolean }) => {
+    const isSilent = Boolean(options?.silent && dataRef.current);
     const effectiveKey = overridePlayerToken || overridePlayerCode || 'default';
     const offlineCacheKey = `indoor_player_offline_data_${effectiveKey}`;
 
@@ -354,7 +427,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     };
 
     try {
-      setLoading(true);
+      if (!isSilent) {
+        setLoading(true);
+      }
       setError(null);
 
       let res: CurrentPlayerData | null = null;
@@ -371,6 +446,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
           setIsOfflinePlayback(false);
         }
       } catch (netErr: any) {
+        if (dataRef.current) {
+          setIsOfflinePlayback(true);
+          return;
+        }
         // Fallback to local storage if network request fails or device is offline
         const localCached = getAnyCachedData();
         if (localCached) {
@@ -386,24 +465,45 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
         throw new Error('Configuração do player não disponível.');
       }
 
-      setData(res);
+      const nextFingerprint = buildClientSyncFingerprint(res);
+      const hasChanged = nextFingerprint !== syncVersionRef.current || !dataRef.current;
 
-      if (res.player?.orientation) {
-        setOrientation(res.player.orientation);
-      }
+      if (hasChanged || options?.explicitRestart) {
+        syncVersionRef.current = nextFingerprint;
+        dataRef.current = res;
+        setData(res);
 
-      // Proactively warm the Workbox media cache in background
-      precachePlaylistAssets(res.items);
+        if (res.player?.orientation) {
+          setOrientation(res.player.orientation);
+        }
 
-      // Fetch RSS headlines immediately
-      if (res.rssFeeds && res.rssFeeds.length > 0) {
-        refreshRssHeadlines(res.rssFeeds);
+        const nextCount = (res.items || []).length;
+        if (options?.explicitRestart) {
+          activeSlideKeyRef.current = '';
+          setCurrentIndex(0);
+          setPlayCycle((c) => c + 1);
+        } else if (nextCount > 0) {
+          setCurrentIndex((prev) => (prev >= nextCount ? 0 : prev));
+        } else {
+          setCurrentIndex(0);
+        }
+
+        // Proactively warm the image cache in background
+        precachePlaylistAssets(res.items);
+
+        // Fetch RSS headlines when playlist changes or on initial load
+        if (res.rssFeeds && res.rssFeeds.length > 0 && (!isSilent || hasChanged)) {
+          refreshRssHeadlines(res.rssFeeds);
+        }
       }
     } catch (err: any) {
+      if (dataRef.current) return;
       // Check again if local cache can rescue the screen
       const localCached = getAnyCachedData();
       if (localCached) {
         try {
+          dataRef.current = localCached;
+          syncVersionRef.current = buildClientSyncFingerprint(localCached);
           setData(localCached);
           setIsOfflinePlayback(true);
           setError(null);
@@ -413,7 +513,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
       }
       setError(err.message || 'Erro ao carregar dados do reprodutor.');
     } finally {
-      setLoading(false);
+      if (!isSilent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -431,6 +533,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
 
   useEffect(() => {
     loadPlayerData();
+  }, [overridePlayerCode, overridePlayerToken]);
+
+  // Silent background sync every 4s so playlist/duration changes apply even if SSE or events were missed
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        loadPlayerData({ silent: true });
+      }
+    }, 4000);
+    return () => clearInterval(interval);
   }, [overridePlayerCode, overridePlayerToken]);
 
   // Automatic Heartbeat ping loop every 15s to keep system status continuously live
@@ -528,24 +640,31 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     setCallRemaining(duration);
   };
 
-  // Handle remote restart / reload command sent from dashboard
+  // Handle remote restart / playlist reload command sent from dashboard (no 2s drop window!)
   const handleRestartCommand = async (cmd?: any) => {
-    const ts = cmd?.timestamp || Date.now();
-    if (ts && ts <= lastRestartTsRef.current + 2000) return;
-    lastRestartTsRef.current = ts;
+    const ts = Number(cmd?.timestamp || 0);
+    if (ts > 0) {
+      const cmdKey = `${ts}:${cmd?.type || 'RELOAD'}:${cmd?.playlistId || ''}:${cmd?.playerId || ''}`;
+      if (handledRestartKeysRef.current.has(cmdKey)) return;
+      handledRestartKeysRef.current.add(cmdKey);
+      if (handledRestartKeysRef.current.size > 100) {
+        const first = handledRestartKeysRef.current.values().next().value;
+        if (first) handledRestartKeysRef.current.delete(first);
+      }
+    }
 
-    console.log('[PlayerView] Comando de reinicialização recebido! Recarregando playlist...', cmd);
+    const explicitRestart = Boolean(cmd?.explicitRestart);
+    console.log('[PlayerView] Sincronizando playlist em tempo real...', cmd);
 
     setRestartNotification({
-      message: cmd?.reason || 'Playlist atualizada! Recarregando mídias...',
+      message: cmd?.reason || 'Playlist atualizada! Sincronizando mídias...',
       timestamp: Date.now(),
     });
-    setTimeout(() => setRestartNotification(null), 4500);
+    setTimeout(() => setRestartNotification(null), 4000);
 
     try {
-      await loadPlayerData();
-      setCurrentIndex(0);
-      if (videoRef.current) {
+      await loadPlayerData({ silent: true, explicitRestart });
+      if (explicitRestart && videoRef.current) {
         videoRef.current.currentTime = 0;
         videoRef.current.play().catch(() => {});
       }
@@ -553,11 +672,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
         window.location.reload();
       }
     } catch (err) {
-      console.warn('Erro ao processar reinicialização da playlist:', err);
+      console.warn('Erro ao processar atualização da playlist:', err);
     }
   };
 
-  // 1. Real-time SSE Connection for instantaneous calls and playlist restarts
+  // 1. Real-time SSE Connection for instantaneous calls and playlist updates
   useEffect(() => {
     const token = overridePlayerToken || data?.player?.access_token || getStoredToken();
     const playerId = data?.player?.id;
@@ -585,6 +704,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             }
           }
         } else if (payload.type === 'RELOAD_PLAYLIST' || payload.type === 'RESTART_PLAYER' || payload.type === 'MEDIA_CHANGED') {
+          const currentPlaylistId = dataRef.current?.playlist?.id;
           const matchesPlayer =
             !payload.playerId ||
             !playerId ||
@@ -592,7 +712,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             payload.playerId === playerCode;
 
           const matchesPlaylist =
-            payload.playlistId && data?.playlist?.id && payload.playlistId === data.playlist.id;
+            payload.playlistId && currentPlaylistId && payload.playlistId === currentPlaylistId;
 
           const matchesCompany =
             payload.companyId && companyId && payload.companyId === companyId;
@@ -613,9 +733,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     return () => {
       eventSource.close();
     };
-  }, [data?.player?.id, data?.player?.code, data?.player?.access_token, data?.company?.id, data?.playlist?.id, overridePlayerCode, overridePlayerToken]);
+  }, [data?.player?.id, data?.player?.code, data?.company?.id, overridePlayerCode, overridePlayerToken]);
 
-  // 2. Fast Active-Call & Restart Polling Fallback (ensures 100% reception even through restrictive proxies/iframes)
+  // 2. Fast Active-Call, Restart & SyncVersion Polling Fallback (1.5s)
   useEffect(() => {
     const targetPlayerId = data?.player?.id;
     const targetCode = overridePlayerCode || data?.player?.code;
@@ -625,12 +745,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     const checkActiveCall = async () => {
       if (!navigator.onLine) return;
       try {
-        const res = await api.getActiveCall(targetPlayerId, targetCode, targetToken, data?.company?.id);
+        const res: any = await api.getActiveCall(targetPlayerId, targetCode, targetToken, dataRef.current?.company?.id);
         if (res?.activeCall) {
           triggerCallOnScreen(res.activeCall);
         }
         if (res?.reloadPlaylist || res?.pendingRestart) {
-          handleRestartCommand(res.pendingRestart);
+          await handleRestartCommand(res.pendingRestart);
+        } else if (res?.syncVersion && res.syncVersion !== syncVersionRef.current) {
+          await loadPlayerData({ silent: true, explicitRestart: false });
         }
       } catch {
         // Silent catch for intermittent network offline
@@ -642,7 +764,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     const pollInterval = setInterval(checkActiveCall, 1500);
 
     return () => clearInterval(pollInterval);
-  }, [data?.player?.id, data?.player?.code, data?.player?.access_token, data?.company?.id, overridePlayerCode, overridePlayerToken]);
+  }, [data?.player?.id, data?.player?.code, overridePlayerCode, overridePlayerToken]);
 
   // 3. Local BroadcastChannel & Storage Event Sync (Instant 0ms multi-tab synchronization)
   useEffect(() => {
@@ -663,11 +785,15 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
               triggerCallOnScreen(call);
             }
           } else if (evt.data?.type === 'RELOAD_PLAYLIST' || evt.data?.type === 'RESTART_PLAYER' || evt.data?.type === 'MEDIA_CHANGED') {
-            const matches =
+            const matchesPlayer =
               !targetPlayerId ||
               !evt.data.playerId ||
               evt.data.playerId === targetPlayerId;
-            if (matches || evt.data?.type === 'MEDIA_CHANGED') {
+            const matchesPlaylist =
+              !evt.data.playlistId ||
+              !dataRef.current?.playlist?.id ||
+              evt.data.playlistId === dataRef.current.playlist.id;
+            if (matchesPlayer || matchesPlaylist || evt.data?.type === 'MEDIA_CHANGED') {
               handleRestartCommand(evt.data);
             }
           }
@@ -804,8 +930,35 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
   const scheduledItems = allItems.filter(isItemScheduled);
   const effectiveItems = hasAnyScheduledRule ? scheduledItems : allItems;
   const currentMedia = effectiveItems.length > 0 ? effectiveItems[currentIndex % effectiveItems.length] : null;
+  currentMediaRef.current = currentMedia;
 
-  // Sugestão 4: Controle de Volume e Mudo por Vídeo & Master
+  const attemptVideoPlayback = (videoEl: HTMLVideoElement | null) => {
+    const media = currentMediaRef.current;
+    if (!videoEl || !media || media.type !== 'video') return;
+    const masterVol = dataRef.current?.player?.master_volume !== undefined ? dataRef.current.player.master_volume : 100;
+    const masterMuted = Boolean(dataRef.current?.player?.master_muted);
+    const itemVol = media.volume !== undefined ? media.volume : 100;
+    const itemMuted = Boolean(media.is_muted);
+    videoEl.volume = Math.max(0, Math.min(1, (masterVol / 100) * (itemVol / 100)));
+    videoEl.muted = masterMuted || itemMuted || autoplayMutedRef.current;
+
+    if (videoEl.paused) {
+      const p = videoEl.play();
+      if (p !== undefined) {
+        p.catch((err: any) => {
+          if (err?.name === 'AbortError') return;
+          if (!videoEl.muted) {
+            videoEl.muted = true;
+            autoplayMutedRef.current = true;
+            setAutoplayMuted(true);
+            videoEl.play().catch(() => {});
+          }
+        });
+      }
+    }
+  };
+
+  // Sugestão 4: Controle de Volume e Mudo por Vídeo & Master (preserva fallback de autoplay mudo)
   useEffect(() => {
     if (currentMedia?.type === 'video' && videoRef.current) {
       const masterVol = data?.player?.master_volume !== undefined ? data.player.master_volume : 100;
@@ -813,13 +966,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
       const itemVol = currentMedia.volume !== undefined ? currentMedia.volume : 100;
       const itemMuted = Boolean(currentMedia.is_muted);
       const finalVol = Math.max(0, Math.min(1, (masterVol / 100) * (itemVol / 100)));
-      const finalMuted = masterMuted || itemMuted;
+      const finalMuted = masterMuted || itemMuted || autoplayMutedRef.current;
       videoRef.current.volume = finalVol;
       videoRef.current.muted = finalMuted;
+      if (videoRef.current.readyState >= 2 && videoRef.current.paused) {
+        attemptVideoPlayback(videoRef.current);
+      }
     }
-  }, [currentIndex, currentMedia, data?.player?.master_volume, data?.player?.master_muted]);
+  }, [currentIndex, playCycle, currentMedia?.id, currentMedia?.volume, currentMedia?.is_muted, data?.player?.master_volume, data?.player?.master_muted]);
 
-  // Avançar mídia com registro de prova de exibição
+  // Avançar mídia com registro de prova de exibição e incremento de playCycle (garante replay com 1 vídeo)
   const advanceNextMedia = () => {
     if (effectiveItems.length === 0) return;
     const item = effectiveItems[currentIndex % effectiveItems.length];
@@ -827,31 +983,35 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
       sendProofOfPlay(item, item.duration || 10);
     }
     setCurrentIndex((prev) => (prev + 1) % effectiveItems.length);
+    setPlayCycle((c) => c + 1);
   };
 
-  // Playlist items loop timer (respeita agendamento e modo sleep)
+  // Playlist items loop timer (aplica alterações de duração imediatamente sem resetar o tempo já decorrido)
   useEffect(() => {
     if (effectiveItems.length === 0 || activeCall || isSleepModeActive()) return;
 
-    const item = effectiveItems[currentIndex % effectiveItems.length];
-    const durationSec = item?.duration || 10;
+    const safeIdx = currentIndex % effectiveItems.length;
+    const item = effectiveItems[safeIdx];
+    if (!item) return;
 
-    if (item?.type === 'video') {
-      // Safety fallback timer: advance if video stalls or finishes without onEnded firing
-      const fallbackMs = Math.max(8000, (durationSec + 4) * 1000);
-      const timer = setTimeout(() => {
-        advanceNextMedia();
-      }, fallbackMs);
-
-      return () => clearTimeout(timer);
+    const slideKey = `${item.id || item.media_id}::${safeIdx}::${playCycle}`;
+    if (activeSlideKeyRef.current !== slideKey) {
+      activeSlideKeyRef.current = slideKey;
+      slideStartedAtRef.current = Date.now();
+      triedVideoFallbacksRef.current.clear();
     }
+
+    const durationSec = Math.max(1, Number(item.duration) || 10);
+    const targetMs = durationSec * 1000;
+    const elapsedMs = Math.max(0, Date.now() - slideStartedAtRef.current);
+    const remainingMs = Math.max(0, targetMs - elapsedMs);
 
     const timer = setTimeout(() => {
       advanceNextMedia();
-    }, durationSec * 1000);
+    }, remainingMs);
 
     return () => clearTimeout(timer);
-  }, [effectiveItems, currentIndex, activeCall, data?.player?.is_sleeping]);
+  }, [effectiveItems, currentIndex, playCycle, activeCall, data?.player?.is_sleeping]);
 
   const handleVideoEnded = () => {
     advanceNextMedia();
@@ -908,7 +1068,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
           <p className="mt-2 text-sm text-slate-400">{error || 'Player não encontrado ou inativo.'}</p>
           <div className="mt-6 flex justify-center gap-3">
             <button
-              onClick={loadPlayerData}
+              onClick={() => loadPlayerData()}
               className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 cursor-pointer"
             >
               Tentar Novamente
@@ -1017,7 +1177,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
           ) : currentMedia?.type === 'weather_clock' ? (
             <div className={`w-full h-full ${getTransitionClass()}`}>
               <WeatherClockMedia
-                key={currentMedia.id + currentIndex}
+                key={`${currentMedia.id}-${currentIndex}-${playCycle}`}
                 weatherData={weatherData}
                 city={data?.playlist?.weather_city || data?.weatherCity || weatherData.city}
                 isVertical={isVertical}
@@ -1028,7 +1188,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
           ) : currentMedia?.type === 'rss' ? (
             <div className={`w-full h-full ${getTransitionClass()}`}>
               <RssNewsMedia
-                key={currentMedia.id + currentIndex}
+                key={`${currentMedia.id}-${currentIndex}-${playCycle}`}
                 feedUrl={currentMedia.file_url}
                 mediaName={currentMedia.name}
                 duration={currentMedia.duration || 15}
@@ -1042,92 +1202,105 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             <div className={`relative w-full h-full flex items-center justify-center overflow-hidden ${getTransitionClass()}`}>
               <video
                 ref={videoRef}
-                key={currentMedia.id + currentIndex}
-                src={
-                  (currentMedia.file_url && currentMedia.file_url.startsWith('http') && !currentMedia.file_url.includes('drive.google.com'))
-                    ? currentMedia.file_url
-                    : ((currentMedia as any)?.local_url && (currentMedia as any).local_url.startsWith('/uploads/'))
-                    ? (currentMedia as any).local_url
-                    : (currentMedia.media_id || currentMedia.id)
-                    ? `/api/media/stream/${currentMedia.media_id || currentMedia.id}`
-                    : resolveMediaUrl(currentMedia.file_url)
-                }
+                key={`${currentMedia.id}-${currentIndex}-${playCycle}`}
+                src={resolveVideoPlaybackUrl(currentMedia)}
                 autoPlay
                 playsInline
                 preload="auto"
-                muted={Boolean(data.player.master_muted || currentMedia.is_muted)}
-                onCanPlay={(e) => {
-                  const v = e.currentTarget;
-                  const playPromise = v.play();
-                  if (playPromise !== undefined) {
-                    playPromise.catch((err) => {
-                      // Autoplay restriction: browser blocked unmuted playback -> mute and resume
-                      v.muted = true;
-                      v.play().catch(() => {});
-                    });
-                  }
-                }}
+                muted={Boolean(data.player.master_muted || currentMedia.is_muted || autoplayMuted)}
+                onLoadedData={(e) => attemptVideoPlayback(e.currentTarget)}
+                onCanPlay={(e) => attemptVideoPlayback(e.currentTarget)}
                 onEnded={handleVideoEnded}
                 onError={(e) => {
                   const target = e.currentTarget;
-                  const streamUrl = `/api/media/stream/${currentMedia.media_id || currentMedia.id}`;
-                  const directUrl = resolveMediaUrl(currentMedia.file_url);
+                  const streamUrl = `${API_BASE_URL}/media/stream/${currentMedia.media_id || currentMedia.id}?proxy=1`;
+                  const directUrl = currentMedia.r2_url || resolveMediaUrl(currentMedia.file_url);
+                  const tried = triedVideoFallbacksRef.current;
 
-                  // 1. If currently using stream proxy and direct cloud/R2 URL exists, try direct URL
-                  if (directUrl && target.src && target.src.includes('/api/media/stream/') && !target.src.includes(directUrl)) {
+                  // 1. Try direct R2/CDN URL if not yet tried
+                  if (directUrl && directUrl.startsWith('http') && !directUrl.includes('drive.google.com') && !tried.has('direct') && target.src !== directUrl) {
+                    tried.add('direct');
                     target.src = directUrl;
                     target.load();
                     return;
                   }
 
-                  // 2. If direct URL failed, try stream proxy
-                  if (streamUrl && target.src && !target.src.includes('/api/media/stream/')) {
+                  // 2. Try server proxy stream if not yet tried
+                  if (streamUrl && !tried.has('proxy') && !target.src.includes('proxy=1')) {
+                    tried.add('proxy');
                     target.src = streamUrl;
                     target.load();
                     return;
                   }
 
                   // 3. Try local URL if available
-                  if ((currentMedia as any)?.local_url && target.src !== (currentMedia as any).local_url) {
-                    target.src = (currentMedia as any).local_url;
+                  if (currentMedia.local_url && !tried.has('local') && target.src !== currentMedia.local_url) {
+                    tried.add('local');
+                    target.src = currentMedia.local_url;
                     target.load();
                     return;
                   }
 
                   // 4. Try Google Drive if applicable
                   const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
-                  if (driveId && !(target.src || '').includes('uc?export=download')) {
+                  if (driveId && !tried.has('drive')) {
+                    tried.add('drive');
                     target.src = `https://drive.google.com/uc?export=download&id=${driveId}`;
                     target.load();
                     return;
                   }
 
                   // 5. Try IndexedDB offline storage
-                  getIndexedDbMedia(currentMedia).then((rec) => {
-                    if (rec && target.src !== rec) {
-                      target.src = rec;
-                      target.load();
-                    } else {
-                      console.warn('Erro ao carregar vídeo em todas as fontes disponíveis, avançando para próxima mídia:', e);
+                  if (!tried.has('idb')) {
+                    tried.add('idb');
+                    getIndexedDbMedia(currentMedia).then((rec) => {
+                      if (rec && target.src !== rec) {
+                        target.src = rec;
+                        target.load();
+                      } else {
+                        console.warn('Erro ao carregar vídeo em todas as fontes disponíveis, avançando para próxima mídia:', e);
+                        setTimeout(() => {
+                          advanceNextMedia();
+                        }, 1500);
+                      }
+                    }).catch(() => {
                       setTimeout(() => {
                         advanceNextMedia();
                       }, 1500);
-                    }
-                  }).catch(() => {
+                    });
+                  } else {
                     setTimeout(() => {
                       advanceNextMedia();
                     }, 1500);
-                  });
+                  }
                 }}
                 className="h-full w-full object-cover"
               />
 
-              {/* Sugestão 4: Indicador de Volume e Áudio */}
-              <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 rounded-lg bg-black/60 backdrop-blur-md px-2.5 py-1 text-[11px] font-mono text-slate-300 border border-slate-800 pointer-events-none">
+              {/* Sugestão 4: Indicador de Volume e Áudio (permite desbloquear áudio se navegador bloqueou) */}
+              <button
+                type="button"
+                onClick={() => {
+                  unlockAudio();
+                  if (videoRef.current && autoplayMutedRef.current) {
+                    videoRef.current.muted = false;
+                    autoplayMutedRef.current = false;
+                    setAutoplayMuted(false);
+                  }
+                }}
+                className={`absolute top-4 right-4 z-20 flex items-center gap-1.5 rounded-lg bg-black/60 backdrop-blur-md px-2.5 py-1 text-[11px] font-mono text-slate-300 border border-slate-800 ${
+                  autoplayMuted ? 'cursor-pointer hover:bg-black/80 border-amber-500/50' : 'pointer-events-none'
+                }`}
+              >
                 {data.player.master_muted || currentMedia.is_muted ? (
                   <>
                     <VolumeX className="h-3.5 w-3.5 text-rose-400" />
                     <span className="text-rose-300 font-semibold">Mudo</span>
+                  </>
+                ) : autoplayMuted ? (
+                  <>
+                    <VolumeX className="h-3.5 w-3.5 text-amber-400" />
+                    <span className="text-amber-300 font-semibold">Clique p/ ativar som</span>
                   </>
                 ) : (
                   <>
@@ -1135,13 +1308,13 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                     <span>{Math.round(((data.player.master_volume ?? 100) * (currentMedia.volume ?? 100)) / 100)}%</span>
                   </>
                 )}
-              </div>
+              </button>
             </div>
           ) : (
             <div className={`w-full h-full ${getTransitionClass()}`}>
               <img
-                key={currentMedia?.id + currentIndex}
-                src={resolveMediaUrl(currentMedia?.file_url)}
+                key={`${currentMedia?.id}-${currentIndex}-${playCycle}`}
+                src={resolveMediaUrl(currentMedia?.r2_url || currentMedia?.file_url)}
                 alt={currentMedia?.name}
                 referrerPolicy="no-referrer"
                 onError={(e) => {
@@ -1155,8 +1328,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                     target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
                     return;
                   }
-                  if ((currentMedia as any)?.local_url && target.src !== (currentMedia as any).local_url) {
-                    target.src = (currentMedia as any).local_url;
+                  if (currentMedia?.local_url && target.src !== currentMedia.local_url) {
+                    target.src = currentMedia.local_url;
                     return;
                   }
                   getIndexedDbMedia(currentMedia).then((rec) => {

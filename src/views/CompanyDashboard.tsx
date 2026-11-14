@@ -643,6 +643,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         }
       }
 
+      if (affectedCount > 0) {
+        broadcastLocalPlaylistUpdate({
+          explicitRestart: choosePlaylistsRestart,
+          reason: `Mídia "${media.name}" vinculada/atualizada nas playlists`,
+        });
+      }
+
       if (choosePlaylistsRestart && selectedPlaylistIdsForMedia.length > 0) {
         await handleRestartPlayers({
           playlistName: `Mídia "${media.name}" sincronizada`,
@@ -1209,6 +1216,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const handleTogglePlayerSleep = async (player: Player) => {
     try {
       const res = await api.togglePlayerSleep(player.id);
+      broadcastLocalPlaylistUpdate({ playerId: player.id, explicitRestart: false });
       showToast('success', res.message || (res.is_sleeping ? 'Player colocado em repouso (Modo Economia).' : 'Player acordado com sucesso.'));
       loadData();
     } catch (err: any) {
@@ -1221,9 +1229,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     try {
       if (editingPlayer) {
         await api.updateCompanyPlayer(editingPlayer.id, playerForm);
+        broadcastLocalPlaylistUpdate({ playerId: editingPlayer.id, playlistId: playerForm.playlist_id || undefined, explicitRestart: false, reason: 'Configurações do player atualizadas' });
         showToast('success', 'Player atualizado com sucesso.');
       } else {
         await api.createCompanyPlayer(playerForm);
+        broadcastLocalPlaylistUpdate({ explicitRestart: false });
         showToast('success', 'Player cadastrado com sucesso.');
       }
       setPlayerModalOpen(false);
@@ -1244,6 +1254,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       action: async () => {
         try {
           const res = await api.togglePlayerStatus(player.id);
+          broadcastLocalPlaylistUpdate({ playerId: player.id, explicitRestart: false });
           showToast('success', res.message);
           setConfirmData((p) => ({ ...p, isOpen: false }));
           loadData();
@@ -1457,6 +1468,40 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     setPlaylistModalOpen(true);
   };
 
+  // Sincronização instantânea (0ms) no mesmo navegador via BroadcastChannel & LocalStorage
+  const broadcastLocalPlaylistUpdate = (params?: {
+    playerId?: string;
+    playlistId?: string;
+    explicitRestart?: boolean;
+    reason?: string;
+  }) => {
+    const ts = Date.now();
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('indoor_media_calls');
+        bc.postMessage({
+          type: 'RELOAD_PLAYLIST',
+          playlistId: params?.playlistId,
+          playerId: params?.playerId,
+          explicitRestart: Boolean(params?.explicitRestart),
+          reason: params?.reason,
+          timestamp: ts,
+        });
+        setTimeout(() => bc.close(), 100);
+      }
+      localStorage.setItem(
+        'indoor_player_restart_cmd',
+        JSON.stringify({
+          playlistId: params?.playlistId,
+          playerId: params?.playerId,
+          explicitRestart: Boolean(params?.explicitRestart),
+          reason: params?.reason,
+          timestamp: ts,
+        })
+      );
+    } catch {}
+  };
+
   // Comando para reiniciar telas / recarregar playlist em tempo real
   const handleRestartPlayers = async (params: {
     playerId?: string;
@@ -1467,36 +1512,23 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     const loadingKey = params.playlistId || params.playerId || 'all';
     try {
       setIsRestartingPlayer(loadingKey);
+      const reason = params.playlistName
+        ? `Playlist "${params.playlistName}" atualizada. Recarregando mídias...`
+        : params.playerName
+        ? `Comando enviado para o reprodutor ${params.playerName}`
+        : 'Comando de reinicialização enviado pelo painel';
       const res = await api.restartPlayer({
         playerId: params.playerId,
         playlistId: params.playlistId,
-        reason: params.playlistName
-          ? `Playlist "${params.playlistName}" atualizada. Recarregando mídias...`
-          : params.playerName
-          ? `Comando enviado para o reprodutor ${params.playerName}`
-          : 'Comando de reinicialização enviado pelo painel',
+        reason,
       });
 
-      // Notificar abas abertas no mesmo navegador imediatamente via BroadcastChannel & LocalStorage
-      try {
-        if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-          const bc = new BroadcastChannel('indoor_media_calls');
-          bc.postMessage({
-            type: 'RELOAD_PLAYLIST',
-            playlistId: params.playlistId,
-            playerId: params.playerId,
-            timestamp: Date.now(),
-          });
-        }
-        localStorage.setItem(
-          'indoor_player_restart_cmd',
-          JSON.stringify({
-            playlistId: params.playlistId,
-            playerId: params.playerId,
-            timestamp: Date.now(),
-          })
-        );
-      } catch {}
+      broadcastLocalPlaylistUpdate({
+        playerId: params.playerId,
+        playlistId: params.playlistId,
+        explicitRestart: true,
+        reason,
+      });
 
       showToast(
         'success',
@@ -1518,7 +1550,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           ...it,
           media_id: it.media_id,
           position: idx + 1,
-          duration: Number(it.duration) || 10,
+          duration: Math.max(1, Number(it.duration) || 10),
           schedule_enabled: Boolean(it.schedule_enabled),
           schedule_days: it.schedule_days || [0, 1, 2, 3, 4, 5, 6],
           schedule_start_time: it.schedule_start_time || undefined,
@@ -1533,13 +1565,25 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
       let targetPlaylistId = editingPlaylist?.id;
       if (editingPlaylist) {
-        await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
-        showToast('success', 'Playlist atualizada com sucesso.');
+        const updatedPl = await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
+        if (updatedPl) {
+          setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
+        }
+        showToast('success', 'Playlist atualizada e sincronizada com as telas.');
       } else {
         const created: any = await api.createCompanyPlaylist(payload as any);
-        if (created?.id) targetPlaylistId = created.id;
+        if (created?.id) {
+          targetPlaylistId = created.id;
+          setPlaylists((prev) => [created, ...prev]);
+        }
         showToast('success', 'Playlist criada com sucesso.');
       }
+
+      broadcastLocalPlaylistUpdate({
+        playlistId: targetPlaylistId,
+        explicitRestart: andRestart,
+        reason: `Playlist "${playlistForm.name}" atualizada`,
+      });
 
       if (andRestart) {
         await handleRestartPlayers({
@@ -1601,7 +1645,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           items: updatedFormItems.map((it, idx) => ({
             ...it,
             position: idx + 1,
-            duration: Number(it.duration) || 10,
+            duration: Math.max(1, Number(it.duration) || 10),
           })),
           restartPlayers: true,
         };
@@ -1610,6 +1654,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           setEditingPlaylist(updatedPl);
           setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
         }
+        broadcastLocalPlaylistUpdate({
+          playlistId: editingPlaylist.id,
+          explicitRestart: true,
+          reason: `Mídia "${media.name}" adicionada à playlist "${editingPlaylist.name}"`,
+        });
         showToast('success', `Mídia "${media.name}" salva na playlist "${editingPlaylist.name}" e reprodutores reiniciados!`);
         loadData();
       } catch (err: any) {
@@ -1714,6 +1763,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         name: feedName.startsWith('Notícias RSS') ? feedName : `Notícias RSS - ${feedName}`,
         duration: 15,
       });
+      broadcastLocalPlaylistUpdate({ playlistId, explicitRestart: false });
       showToast('success', `📰 Notícias "${feedName}" incluídas na playlist "${targetPl?.name || 'selecionada'}"!`);
       setPlaylistTargetModal({ isOpen: false, type: 'rss' });
       loadData();
@@ -1730,6 +1780,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         playlist_id: playlistId,
         duration: 12,
       });
+      broadcastLocalPlaylistUpdate({ playlistId, explicitRestart: false });
       showToast('success', `🌤️ Hora Certa & Previsão do Tempo incluída na playlist "${targetPl?.name || 'selecionada'}"!`);
       loadData();
     } catch (err: any) {
@@ -1740,6 +1791,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const handleTogglePlaylist = async (playlist: Playlist) => {
     try {
       const res = await api.togglePlaylistStatus(playlist.id);
+      broadcastLocalPlaylistUpdate({ playlistId: playlist.id, explicitRestart: false });
       showToast('success', res.message);
       loadData();
     } catch (err: any) {
@@ -1755,6 +1807,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       action: async () => {
         try {
           const res = await api.deleteCompanyPlaylist(playlist.id);
+          broadcastLocalPlaylistUpdate({ playlistId: playlist.id, explicitRestart: true });
           showToast('success', res.message);
           setConfirmData((p) => ({ ...p, isOpen: false }));
           loadData();
@@ -1765,7 +1818,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     });
   };
 
-  // --- MEDIA HANDLERS ---
   // --- MEDIA HANDLERS ---
   const handleProcessDeviceFiles = (files: FileList | File[]) => {
     const list = Array.from(files);
@@ -1792,11 +1844,11 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
 
       const previewUrl = URL.createObjectURL(file);
-      // Mantém o nome original com o qual o arquivo sobe
       const originalName = file.name;
+      const itemId = `qf-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
       newItems.push({
-        id: `qf-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: itemId,
         file,
         dataUrl: previewUrl,
         name: originalName,
@@ -1805,6 +1857,23 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         isVideo,
         duration: isVideo ? 15 : 10,
       });
+
+      // Detectar duração real do vídeo automaticamente
+      if (isVideo) {
+        try {
+          const tempVideo = document.createElement('video');
+          tempVideo.preload = 'metadata';
+          tempVideo.onloadedmetadata = () => {
+            const realSec = Math.round(tempVideo.duration);
+            if (!isNaN(realSec) && realSec > 0) {
+              setSelectedDeviceFiles((prev) =>
+                prev.map((q) => (q.id === itemId ? { ...q, duration: realSec } : q))
+              );
+            }
+          };
+          tempVideo.src = previewUrl;
+        } catch {}
+      }
     }
 
     if (newItems.length > 0) {
@@ -2022,6 +2091,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         }
       }
 
+      if (targetPlIds.length > 0) {
+        broadcastLocalPlaylistUpdate({
+          explicitRestart: andRestart,
+          reason: 'Novas mídias vinculadas à playlist',
+        });
+      }
+
       // Reiniciar telas se solicitado
       if (andRestart) {
         await handleRestartPlayers({});
@@ -2046,6 +2122,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
           const bc = new BroadcastChannel('indoor_media_calls');
           bc.postMessage({ type: 'MEDIA_CHANGED', action: 'created', timestamp: Date.now() });
+          setTimeout(() => bc.close(), 100);
         }
         localStorage.setItem('indoor_media_updated_at', String(Date.now()));
       } catch {}
@@ -2137,6 +2214,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
               const bc = new BroadcastChannel('indoor_media_calls');
               bc.postMessage({ type: 'MEDIA_CHANGED', action: 'deleted', mediaId: media.id, timestamp: Date.now() });
+              setTimeout(() => bc.close(), 100);
             }
             localStorage.setItem('indoor_media_updated_at', String(Date.now()));
           } catch {}

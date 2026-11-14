@@ -9,10 +9,18 @@ interface SSEClient {
   companyId?: string;
 }
 
+interface PendingRestartEntry {
+  timestamp: number;
+  fullReload?: boolean;
+  explicitRestart?: boolean;
+  reason?: string;
+  consumedBy: Set<string>;
+}
+
 class RealtimeHub {
   private clients: SSEClient[] = [];
   private activeCalls: Map<string, PlayerCall> = new Map();
-  private pendingRestarts: Map<string, { timestamp: number; fullReload?: boolean; reason?: string }> = new Map();
+  private pendingRestarts: Map<string, PendingRestartEntry> = new Map();
 
   constructor() {
     // Keep-alive heartbeat to prevent proxies/browsers from killing SSE
@@ -247,6 +255,7 @@ class RealtimeHub {
     playlistId?: string;
     companyId?: string;
     fullReload?: boolean;
+    explicitRestart?: boolean;
     reason?: string;
   }): { deliveredCount: number; targetPlayerCount: number } {
     const data = db.getData();
@@ -281,7 +290,8 @@ class RealtimeHub {
       playerId: params.playerId,
       companyId: params.companyId,
       fullReload: params.fullReload ?? false,
-      reason: params.reason || 'Playlist atualizada pelo painel. Reiniciando reprodução...',
+      explicitRestart: params.explicitRestart ?? false,
+      reason: params.reason || 'Playlist atualizada pelo painel.',
       timestamp,
     };
 
@@ -312,23 +322,26 @@ class RealtimeHub {
     }
 
     // Persist pending restart for 30s to cover players polling or momentarily reconnecting
-    const restartEntry = {
+    // Share a single entry instance across keys so consuming by player/playlist/company deduplicates cleanly per screen
+    const sharedEntry: PendingRestartEntry = {
       timestamp,
       fullReload: params.fullReload,
+      explicitRestart: params.explicitRestart,
       reason: eventPayload.reason,
+      consumedBy: new Set<string>(),
     };
 
-    if (params.companyId) {
-      this.pendingRestarts.set(`company:${params.companyId}`, restartEntry);
+    if (params.companyId && !params.playerId && !params.playlistId) {
+      this.pendingRestarts.set(`company:${params.companyId}`, sharedEntry);
     }
     if (params.playlistId) {
-      this.pendingRestarts.set(`playlist:${params.playlistId}`, restartEntry);
+      this.pendingRestarts.set(`playlist:${params.playlistId}`, sharedEntry);
     }
     for (const id of targetPlayerIds) {
-      this.pendingRestarts.set(`player:${id}`, restartEntry);
+      this.pendingRestarts.set(`player:${id.toLowerCase()}`, sharedEntry);
       const p = data.players.find((pl) => pl.id === id);
       if (p) {
-        this.pendingRestarts.set(`player:${p.code.toLowerCase()}`, restartEntry);
+        this.pendingRestarts.set(`player:${p.code.toLowerCase()}`, sharedEntry);
       }
     }
 
@@ -337,36 +350,66 @@ class RealtimeHub {
 
   public checkAndClearPendingRestart(
     playerIdOrCode: string,
-    companyId?: string
-  ): { reload: boolean; timestamp: number; fullReload?: boolean; reason?: string } | null {
+    companyId?: string,
+    playlistId?: string
+  ): { reload: boolean; timestamp: number; fullReload?: boolean; explicitRestart?: boolean; reason?: string } | null {
     const target = String(playerIdOrCode || '').trim().toLowerCase();
     const now = Date.now();
+    const data = db.getData();
+    const matchedPlayer = data.players.find(
+      (p) => p.id.toLowerCase() === target || p.code.toLowerCase() === target
+    );
+    const consumerAliases = Array.from(
+      new Set(
+        [
+          target,
+          matchedPlayer?.id?.toLowerCase(),
+          matchedPlayer?.code?.toLowerCase(),
+        ].filter(Boolean) as string[]
+      )
+    );
+    if (consumerAliases.length === 0) consumerAliases.push('anonymous');
 
-    // Check player-specific entry
-    const playerKey = `player:${target}`;
-    const pEntry = this.pendingRestarts.get(playerKey);
-    if (pEntry && now - pEntry.timestamp < 30000) {
-      this.pendingRestarts.delete(playerKey);
-      return {
-        reload: true,
-        timestamp: pEntry.timestamp,
-        fullReload: pEntry.fullReload,
-        reason: pEntry.reason,
-      };
+    // Prune expired entries (>30s)
+    for (const [k, entry] of this.pendingRestarts.entries()) {
+      if (now - entry.timestamp >= 30000) {
+        this.pendingRestarts.delete(k);
+      }
     }
 
-    // Check company-specific entry
-    if (companyId) {
-      const compKey = `company:${companyId}`;
-      const cEntry = this.pendingRestarts.get(compKey);
-      if (cEntry && now - cEntry.timestamp < 30000) {
-        return {
-          reload: true,
-          timestamp: cEntry.timestamp,
-          fullReload: cEntry.fullReload,
-          reason: cEntry.reason,
-        };
+    const tryConsume = (entry: PendingRestartEntry | undefined) => {
+      if (!entry) return null;
+      if (consumerAliases.some((alias) => entry.consumedBy.has(alias))) {
+        return null;
       }
+      for (const alias of consumerAliases) {
+        entry.consumedBy.add(alias);
+      }
+      return {
+        reload: true,
+        timestamp: entry.timestamp,
+        fullReload: entry.fullReload,
+        explicitRestart: entry.explicitRestart,
+        reason: entry.reason,
+      };
+    };
+
+    // 1. Check player-specific entries across all aliases
+    for (const alias of consumerAliases) {
+      const res = tryConsume(this.pendingRestarts.get(`player:${alias}`));
+      if (res) return res;
+    }
+
+    // 2. Check playlist-specific entry
+    if (playlistId) {
+      const res = tryConsume(this.pendingRestarts.get(`playlist:${playlistId}`));
+      if (res) return res;
+    }
+
+    // 3. Check company-specific entry
+    if (companyId) {
+      const res = tryConsume(this.pendingRestarts.get(`company:${companyId}`));
+      if (res) return res;
     }
 
     return null;

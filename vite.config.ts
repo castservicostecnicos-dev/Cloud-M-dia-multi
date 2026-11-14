@@ -75,7 +75,7 @@ export default defineConfig(() => {
                   purgeOnQuotaError: true,
                 },
                 cacheableResponse: {
-                  statuses: [0, 200],
+                  statuses: [200],
                 },
                 rangeRequests: true,
               },

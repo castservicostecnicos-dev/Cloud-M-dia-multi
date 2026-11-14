@@ -1405,26 +1405,109 @@ export async function handleClientFallbackRequest(
   }
 
   if (pathOnly === '/company/playlists' && method === 'POST') {
+    const nowStr = new Date().toISOString();
+    const plId = `pl-${Date.now()}`;
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const normalizedItems = rawItems.map((it: any, index: number) => {
+      const med = (dbData.media || []).find((m: any) => m.id === it.media_id);
+      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
+      const bestUrl = isWeather ? 'widget:weather_clock' : (med?.r2_url || (med?.file_url?.startsWith('http') ? med.file_url : '') || it.file_url || med?.file_url || '');
+      return {
+        ...it,
+        id: it.id || `pli-${Date.now()}-${index}`,
+        playlist_id: plId,
+        position: index + 1,
+        duration: Math.max(1, Number(it.duration) || 10),
+        name: med?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
+        type: med?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
+        file_url: bestUrl,
+        r2_url: med?.r2_url || it.r2_url,
+        created_at: it.created_at || nowStr,
+      };
+    });
     const newPl = {
-      id: `pl-${Date.now()}`,
+      id: plId,
       company_id: activeCompanyId,
       active: true,
-      items: [],
-      created_at: new Date().toISOString(),
+      created_at: nowStr,
+      updated_at: nowStr,
       ...body,
+      items: normalizedItems,
     };
     dbData.playlists = [newPl, ...(dbData.playlists || [])];
+    const ts = Date.now();
+    dbData.pending_restarts = [
+      { id: `rst-${ts}`, playlistId: plId, explicitRestart: Boolean(body.restartPlayers), reason: `Playlist "${newPl.name}" criada`, timestamp: ts },
+      ...(dbData.pending_restarts || []).slice(0, 19),
+    ];
     await saveCloudDb(dbData);
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('indoor_media_calls');
+        bc.postMessage({ type: 'RELOAD_PLAYLIST', playlistId: plId, explicitRestart: Boolean(body.restartPlayers), timestamp: ts });
+        setTimeout(() => bc.close(), 100);
+      }
+      localStorage.setItem('indoor_player_restart_cmd', JSON.stringify({ playlistId: plId, explicitRestart: Boolean(body.restartPlayers), timestamp: ts }));
+    } catch {}
     return newPl;
   }
 
   if (pathOnly.startsWith('/company/playlists/') && method === 'PUT') {
     const plId = pathOnly.split('/')[3];
+    const nowStr = new Date().toISOString();
+    const hasItems = Array.isArray(body.items);
+    const normalizedItems = hasItems
+      ? body.items.map((it: any, index: number) => {
+          const med = (dbData.media || []).find((m: any) => m.id === it.media_id);
+          const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
+          const bestUrl = isWeather ? 'widget:weather_clock' : (med?.r2_url || (med?.file_url?.startsWith('http') ? med.file_url : '') || it.file_url || med?.file_url || '');
+          return {
+            ...it,
+            id: it.id || `pli-${Date.now()}-${index}`,
+            playlist_id: plId,
+            position: index + 1,
+            duration: Math.max(1, Number(it.duration) || 10),
+            name: med?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
+            type: med?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
+            file_url: bestUrl,
+            r2_url: med?.r2_url || it.r2_url,
+            created_at: it.created_at || nowStr,
+          };
+        })
+      : undefined;
+
     dbData.playlists = (dbData.playlists || []).map((p: any) =>
-      p.id === plId ? { ...p, ...body, updated_at: new Date().toISOString() } : p
+      p.id === plId
+        ? {
+            ...p,
+            ...body,
+            ...(normalizedItems ? { items: normalizedItems } : {}),
+            updated_at: nowStr,
+          }
+        : p
     );
+    const updatedPl = (dbData.playlists || []).find((p: any) => p.id === plId);
+    const ts = Date.now();
+    dbData.pending_restarts = [
+      {
+        id: `rst-${ts}`,
+        playlistId: plId,
+        explicitRestart: Boolean(body.restartPlayers),
+        reason: `Playlist "${updatedPl?.name || ''}" atualizada`,
+        timestamp: ts,
+      },
+      ...(dbData.pending_restarts || []).slice(0, 19),
+    ];
     await saveCloudDb(dbData);
-    return (dbData.playlists || []).find((p: any) => p.id === plId);
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('indoor_media_calls');
+        bc.postMessage({ type: 'RELOAD_PLAYLIST', playlistId: plId, explicitRestart: Boolean(body.restartPlayers), timestamp: ts });
+        setTimeout(() => bc.close(), 100);
+      }
+      localStorage.setItem('indoor_player_restart_cmd', JSON.stringify({ playlistId: plId, explicitRestart: Boolean(body.restartPlayers), timestamp: ts }));
+    } catch {}
+    return updatedPl;
   }
 
   if (pathOnly.startsWith('/company/operators/') && method === 'PUT') {
@@ -2461,34 +2544,76 @@ export async function handleClientFallbackRequest(
     };
     const compPlaylists = (dbData.playlists || []).filter((pl: any) => pl.company_id === player.company_id);
     const playlist =
-      compPlaylists.find((pl: any) => pl.id === player.playlist_id) ||
+      compPlaylists.find((pl: any) => pl.id === player.playlist_id && pl.active !== false) ||
       compPlaylists.find((pl: any) => pl.active) ||
       compPlaylists[0] ||
       null;
     const compMedia = (dbData.media || []).filter((m: any) => m.company_id === player.company_id);
     const items = (playlist?.items || [])
       .map((it: any, idx: number) => {
-        const med = compMedia.find((m: any) => m.id === it.media_id);
-        if (!med) return null;
+        let med = compMedia.find((m: any) => m.id === it.media_id);
+        if (!med && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+          med = compMedia.find((m: any) => m.type === 'weather_clock');
+        }
+        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
+        if (!med && !isWeather) return null;
+        if (med && med.active === false) return null;
+
+        const r2Url = med?.r2_url || it.r2_url;
+        const bestUrl = isWeather
+          ? 'widget:weather_clock'
+          : (r2Url && String(r2Url).startsWith('http'))
+          ? r2Url
+          : (med?.file_url && (med.file_url.startsWith('http') || med.file_url.startsWith('/uploads/') || med.file_url.startsWith('data:')))
+          ? med.file_url
+          : (it.file_url && (it.file_url.startsWith('http') || it.file_url.startsWith('/uploads/') || it.file_url.startsWith('data:')))
+          ? it.file_url
+          : (med?.file_url || it.file_url || '');
+
         return {
           id: it.id || `item-${idx}`,
-          media_id: med.id,
+          media_id: med?.id || it.media_id,
           position: it.position || idx + 1,
-          duration: it.duration || med.duration || 10,
-          name: med.name,
-          type: med.type,
-          file_url: med.file_url,
+          duration: Number(it.duration) || med?.duration || 10,
+          name: med?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
+          type: med?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
+          file_url: bestUrl,
+          r2_url: r2Url,
+          local_url: med?.local_url || it.local_url,
+          drive_file_id: med?.drive_file_id || it.drive_file_id,
+          drive_view_url: med?.drive_view_url || it.drive_view_url,
+          schedule_enabled: Boolean(it.schedule_enabled),
+          schedule_days: it.schedule_days,
+          schedule_start_time: it.schedule_start_time,
+          schedule_end_time: it.schedule_end_time,
+          schedule_start_date: it.schedule_start_date,
+          schedule_end_date: it.schedule_end_date,
+          volume: it.volume !== undefined ? it.volume : 100,
+          is_muted: Boolean(it.is_muted),
         };
       })
       .filter(Boolean);
     const pendingRestart = (dbData.pending_restarts || []).find(
       (r: any) =>
         (!r.playerId || r.playerId === player.id || r.playerId === player.code) &&
+        (!r.playlistId || !playlist || r.playlistId === playlist.id) &&
         Date.now() - Number(r.timestamp || 0) < 60000
     );
 
     const lastSeenTime = player.last_seen ? new Date(player.last_seen).getTime() : 0;
     const isOnline = Boolean(player.status === 'active' && lastSeenTime > 0 && Date.now() - lastSeenTime <= 45000);
+    const syncVersion = [
+      player.id,
+      player.playlist_id || '',
+      player.updated_at || '',
+      player.orientation || '',
+      Boolean(player.master_muted),
+      player.master_volume ?? 100,
+      Boolean(player.is_sleeping),
+      playlist?.id || '',
+      playlist?.updated_at || '',
+      items.map((x: any) => `${x.id}:${x.media_id}:${x.position}:${x.duration}:${x.file_url}`).join(';'),
+    ].join('|');
 
     return {
       player: {
@@ -2505,6 +2630,7 @@ export async function handleClientFallbackRequest(
       rssFeeds: (dbData.rss_feeds || []).filter((r: any) => r.company_id === player.company_id),
       pendingRestart: pendingRestart || null,
       reloadPlaylist: Boolean(pendingRestart),
+      syncVersion,
     };
   }
 
@@ -2533,6 +2659,7 @@ export async function handleClientFallbackRequest(
       playerId: playerId || null,
       playlistId: playlistId || null,
       fullReload: Boolean(fullReload),
+      explicitRestart: true,
       reason: reason || 'Comando de reinicialização enviado pelo painel',
       timestamp: now,
     };
@@ -2546,17 +2673,29 @@ export async function handleClientFallbackRequest(
 
     try {
       if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('indoor_media_channel');
+        const bc = new BroadcastChannel('indoor_media_calls');
         bc.postMessage({
           type: 'RELOAD_PLAYLIST',
           playerId,
           playlistId,
           fullReload: Boolean(fullReload),
+          explicitRestart: true,
           reason,
           timestamp: now,
         });
         setTimeout(() => bc.close(), 100);
       }
+      localStorage.setItem(
+        'indoor_player_restart_cmd',
+        JSON.stringify({
+          playerId,
+          playlistId,
+          fullReload: Boolean(fullReload),
+          explicitRestart: true,
+          reason,
+          timestamp: now,
+        })
+      );
     } catch {}
 
     return {
@@ -2636,22 +2775,53 @@ export async function handleClientFallbackRequest(
   if (pathOnly === '/player/active-call' && method === 'GET') {
     const qs = new URLSearchParams(endpoint.split('?')[1] || '');
     const playerId = qs.get('playerId');
+    const code = qs.get('code');
+    const token = qs.get('token');
+    const resolvedPlayer = (dbData.players || []).find(
+      (p: any) =>
+        (playerId && p.id === playerId) ||
+        (code && String(p.code || '').toLowerCase() === code.toLowerCase()) ||
+        (token && (p.access_token === token || String(p.code || '').toLowerCase() === token.toLowerCase()))
+    ) || (dbData.players || [])[0];
+    const targetId = resolvedPlayer?.id || playerId;
+
     const recentCall = (dbData.player_calls || []).find(
       (c: any) =>
-        (!playerId || c.player_id === playerId) &&
+        (!targetId || c.player_id === targetId) &&
         Date.now() - Number(c.timestamp || 0) < (Number(c.duration || 10) + 5) * 1000
     );
 
+    const activePlaylist = resolvedPlayer?.playlist_id
+      ? (dbData.playlists || []).find((pl: any) => pl.id === resolvedPlayer.playlist_id && pl.active !== false)
+      : null;
+
     const pendingRestart = (dbData.pending_restarts || []).find(
       (r: any) =>
-        (!r.playerId || r.playerId === playerId) &&
+        (!r.playerId || r.playerId === targetId || (code && r.playerId === code)) &&
+        (!r.playlistId || !activePlaylist || r.playlistId === activePlaylist.id) &&
         Date.now() - Number(r.timestamp || 0) < 60000
     );
+
+    const syncVersion = resolvedPlayer
+      ? [
+          resolvedPlayer.id,
+          resolvedPlayer.playlist_id || '',
+          resolvedPlayer.updated_at || '',
+          resolvedPlayer.orientation || '',
+          Boolean(resolvedPlayer.master_muted),
+          resolvedPlayer.master_volume ?? 100,
+          Boolean(resolvedPlayer.is_sleeping),
+          activePlaylist?.id || '',
+          activePlaylist?.updated_at || '',
+          (activePlaylist?.items || []).map((x: any) => `${x.id}:${x.media_id}:${x.position}:${x.duration}:${x.file_url}`).join(';'),
+        ].join('|')
+      : undefined;
 
     return {
       activeCall: recentCall || null,
       pendingRestart: pendingRestart || null,
       reloadPlaylist: Boolean(pendingRestart),
+      syncVersion,
     };
   }
 

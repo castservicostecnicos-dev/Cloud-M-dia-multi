@@ -23,6 +23,7 @@ import { WeatherClockMedia } from './WeatherClockMedia';
 import { RssNewsMedia } from './RssNewsMedia';
 import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
 import { getIndexedDbMedia } from '../lib/indexedDbMedia';
+import { API_BASE_URL } from '../lib/api';
 
 interface MediaPreviewModalProps {
   media: Media | null;
@@ -43,12 +44,16 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
 
   const [isPlaying, setIsPlaying] = useState(true);
   const getInitialMediaSrc = (m: Media): string => {
+    const r2Url = (m as any).r2_url;
+    if (r2Url && typeof r2Url === 'string' && r2Url.startsWith('http') && !r2Url.includes('drive.google.com')) {
+      return r2Url;
+    }
     if (m.type === 'video') {
       if (m.file_url && m.file_url.startsWith('http') && !m.file_url.includes('drive.google.com')) {
         return m.file_url;
       }
       if (m.local_url && m.local_url.startsWith('/uploads/')) return m.local_url;
-      if (m.id) return `/api/media/stream/${m.id}`;
+      if (m.id) return `${API_BASE_URL}/media/stream/${m.id}`;
       if (m.file_url && m.file_url.startsWith('/uploads/')) return m.file_url;
     }
     return resolveMediaDisplayUrl(m.file_url);
@@ -197,16 +202,16 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                     onPlay={() => setIsPlaying(true)}
                     onError={(e) => {
                       const target = e.currentTarget;
-                      const streamProxyUrl = `/api/media/stream/${media.id}`;
-                      const directUrl = resolveMediaDisplayUrl(media.file_url);
+                      const streamProxyUrl = `${API_BASE_URL}/media/stream/${media.id}?proxy=1`;
+                      const directUrl = (media as any).r2_url || resolveMediaDisplayUrl(media.file_url);
 
-                      if (directUrl && target.src && target.src.includes('/api/media/stream/') && !target.src.includes(directUrl)) {
+                      if (directUrl && directUrl.startsWith('http') && !directUrl.includes('drive.google.com') && target.src && target.src.includes('/media/stream/') && !target.src.includes(directUrl)) {
                         target.src = directUrl;
                         setResolvedSrc(directUrl);
                         return;
                       }
 
-                      if (streamProxyUrl && target.src && !target.src.includes('/api/media/stream/')) {
+                      if (streamProxyUrl && target.src && !target.src.includes('proxy=1')) {
                         target.src = streamProxyUrl;
                         setResolvedSrc(streamProxyUrl);
                         return;
@@ -268,7 +273,7 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
                       type="button"
                       onClick={() => {
                         setVideoError(false);
-                        const proxyUrl = `/api/media/stream/${media.id}?t=${Date.now()}`;
+                        const proxyUrl = `${API_BASE_URL}/media/stream/${media.id}?proxy=1&t=${Date.now()}`;
                         setResolvedSrc(proxyUrl);
                         if (videoRef.current) {
                           videoRef.current.src = proxyUrl;

@@ -1497,12 +1497,15 @@ apiRouter.put('/company/players/:id', requireAuth, requireRole('company'), (req:
   player.updated_at = new Date().toISOString();
 
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   // Notify connected player immediately
   try {
+    realtimeHub.broadcastMediaChange(companyId, 'updated');
     realtimeHub.sendRestartCommand({
       playerId: player.id,
       companyId,
+      explicitRestart: false,
       reason: 'Configurações de exibição do player atualizadas',
     });
   } catch {}
@@ -1839,6 +1842,97 @@ apiRouter.delete('/company/operators/:id', requireAuth, requireRole('company'), 
 });
 
 // Playlists Management
+function isDirectPlayableUrl(url?: string): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  return (
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('/uploads/') ||
+    trimmed.startsWith('/api/') ||
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('widget:')
+  );
+}
+
+function resolveBestMediaFileUrl(media?: Media, fallbackUrl?: string, isWeather?: boolean): string {
+  if (isWeather) return 'widget:weather_clock';
+  const r2Url = (media as any)?.r2_url;
+  if (isDirectPlayableUrl(r2Url)) return r2Url;
+  if (isDirectPlayableUrl(media?.file_url)) return media!.file_url;
+  if (isDirectPlayableUrl(fallbackUrl)) return fallbackUrl!;
+  if (isDirectPlayableUrl(media?.local_url)) return media!.local_url!;
+  return media?.file_url || fallbackUrl || '';
+}
+
+function computePlayerSyncVersion(data: any, player?: Player, playlist?: Playlist): string {
+  if (!player) return 'none';
+  const pPart = [
+    player.id,
+    player.playlist_id || '',
+    player.orientation || 'horizontal',
+    player.transition_effect || '',
+    player.master_volume ?? 100,
+    Boolean(player.master_muted),
+    Boolean(player.is_sleeping),
+    Boolean(player.eco_mode_enabled),
+    player.eco_sleep_start || '',
+    player.eco_sleep_end || '',
+    player.eco_screen_type || '',
+    player.updated_at || '',
+  ].join('|');
+
+  if (!playlist || playlist.active === false) {
+    return `${pPart}::no-pl`;
+  }
+
+  const itemsPart = (playlist.items || [])
+    .filter((it: any) => !isItemObjectDeleted(data, it))
+    .map((it: any) => {
+      let m = data.media.find((med: any) => med.id === it.media_id);
+      if (!m && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+        m = data.media.find((med: any) => (med.company_id === playlist.company_id || !med.company_id) && med.type === 'weather_clock');
+      }
+      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || m?.type === 'weather_clock';
+      if (!m && !isWeather) return '';
+      if (m && m.active === false) return '';
+      return [
+        it.id,
+        it.media_id,
+        it.position,
+        Number(it.duration) || m?.duration || 10,
+        m?.updated_at || '',
+        resolveBestMediaFileUrl(m, it.file_url, isWeather),
+        Boolean(it.schedule_enabled),
+        Array.isArray(it.schedule_days) ? it.schedule_days.join(',') : '',
+        it.schedule_start_time || '',
+        it.schedule_end_time || '',
+        it.schedule_start_date || '',
+        it.schedule_end_date || '',
+        it.volume ?? 100,
+        Boolean(it.is_muted),
+      ].join(':');
+    })
+    .filter(Boolean)
+    .join(';');
+
+  const plPart = [
+    playlist.id,
+    Boolean(playlist.active),
+    playlist.updated_at || '',
+    playlist.weather_city || '',
+    playlist.transition_effect || '',
+    playlist.transition_duration || 0.8,
+    Boolean(playlist.custom_ticker_enabled),
+    playlist.custom_ticker_text || '',
+    playlist.custom_ticker_bg_color || '',
+    playlist.custom_ticker_speed || 2,
+    itemsPart,
+  ].join('|');
+
+  return `${pPart}::${plPart}`;
+}
+
 function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: any): Playlist {
   const activeItems = (playlist.items || []).filter((it) => {
     if (data && isItemObjectDeleted(data, it)) return false;
@@ -1860,12 +1954,14 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: 
         media = mediaList.find((m) => (m.company_id === playlist.company_id || !m.company_id) && m.type === 'weather_clock');
       }
       const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
+      const resolvedUrl = resolveBestMediaFileUrl(media, it.file_url, isWeather);
       return {
         ...it,
         name: media?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
         type: media?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
-        file_url: media?.file_url || (isWeather ? 'widget:weather_clock' : (it.file_url || '')),
-        local_url: media?.local_url || (it as any).local_url || (media?.file_url?.startsWith('/uploads/') ? media.file_url : undefined),
+        file_url: resolvedUrl,
+        r2_url: (media as any)?.r2_url || (it as any).r2_url || undefined,
+        local_url: media?.local_url || (it as any).local_url || (resolvedUrl?.startsWith('/uploads/') ? resolvedUrl : undefined),
         drive_file_id: media?.drive_file_id || (it as any).drive_file_id || undefined,
         drive_view_url: media?.drive_view_url || (it as any).drive_view_url || undefined,
       };
@@ -1909,15 +2005,16 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'
 
   const formattedItems = (items || []).map((it: any, index: number) => {
     const media = data.media.find((m) => m.id === it.media_id);
+    const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
     return {
       id: `pli-${Date.now()}-${index}`,
       playlist_id: playlistId,
       media_id: it.media_id,
       position: index + 1,
-      duration: Number(it.duration) || 10,
+      duration: Math.max(1, Number(it.duration) || 10),
       name: media?.name || it.name,
       type: media?.type || it.type,
-      file_url: media?.file_url || it.file_url,
+      file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
       // Sugestão 1: Agendamento Inteligente
       schedule_enabled: Boolean(it.schedule_enabled),
       schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
@@ -1955,21 +2052,21 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'
 
   data.playlists.push(newPlaylist);
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
-    if (req.body.restartPlayers) {
-      realtimeHub.sendRestartCommand({
-        playlistId: newPlaylist.id,
-        companyId,
-        reason: `Nova playlist "${newPlaylist.name}" criada com mídias`,
-      });
-    }
+    realtimeHub.sendRestartCommand({
+      playlistId: newPlaylist.id,
+      companyId,
+      explicitRestart: Boolean(req.body.restartPlayers),
+      reason: `Nova playlist "${newPlaylist.name}" criada com mídias`,
+    });
   } catch (e) {
     console.warn('Falha ao disparar broadcast de nova playlist:', e);
   }
 
-  res.status(201).json(enrichPlaylistWithMedia(newPlaylist, data.media));
+  res.status(201).json(enrichPlaylistWithMedia(newPlaylist, data.media, data));
 });
 
 apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
@@ -2003,15 +2100,16 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'adm
     const now = new Date().toISOString();
     playlist.items = items.map((it: any, index: number) => {
       const media = data.media.find((m) => m.id === it.media_id);
+      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
       return {
         id: it.id || `pli-${Date.now()}-${index}`,
         playlist_id: playlist.id,
         media_id: it.media_id,
         position: index + 1,
-        duration: Number(it.duration) || 10,
+        duration: Math.max(1, Number(it.duration) || 10),
         name: media?.name || it.name,
         type: media?.type || it.type,
-        file_url: media?.file_url || it.file_url,
+        file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
         // Sugestão 1: Agendamento Inteligente
         schedule_enabled: Boolean(it.schedule_enabled),
         schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
@@ -2029,22 +2127,22 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'adm
   playlist.updated_at = new Date().toISOString();
 
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
-  // Automatically broadcast restart/reload command to connected players and sync dashboards
+  // Automatically broadcast reload command to connected players and sync dashboards
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
-    if (items || req.body.restartPlayers) {
-      realtimeHub.sendRestartCommand({
-        playlistId: playlist.id,
-        companyId,
-        reason: `Playlist "${playlist.name}" atualizada com novas mídias`,
-      });
-    }
+    realtimeHub.sendRestartCommand({
+      playlistId: playlist.id,
+      companyId,
+      explicitRestart: Boolean(req.body.restartPlayers),
+      reason: `Playlist "${playlist.name}" atualizada`,
+    });
   } catch (e) {
     console.warn('Falha ao disparar sincronização de playlist:', e);
   }
 
-  res.json(enrichPlaylistWithMedia(playlist, data.media));
+  res.json(enrichPlaylistWithMedia(playlist, data.media, data));
 });
 
 apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
@@ -2059,12 +2157,14 @@ apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole(
   playlist.active = !playlist.active;
   playlist.updated_at = new Date().toISOString();
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(playlist.company_id, 'updated');
     realtimeHub.sendRestartCommand({
       playlistId: playlist.id,
       companyId: playlist.company_id,
+      explicitRestart: false,
       reason: playlist.active ? 'Playlist ativada' : 'Playlist desativada',
     });
   } catch {}
@@ -2090,15 +2190,18 @@ apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', '
   for (const player of data.players) {
     if (player.playlist_id === id) {
       player.playlist_id = null;
+      player.updated_at = new Date().toISOString();
     }
   }
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
     realtimeHub.sendRestartCommand({
       playlistId: id,
       companyId,
+      explicitRestart: true,
       reason: 'Playlist excluída',
     });
   } catch {}
@@ -2743,7 +2846,37 @@ apiRouter.put('/company/media/:id', requireAuth, requireRole('company', 'admin')
   if (mime_type !== undefined) media.mime_type = mime_type;
   media.updated_at = new Date().toISOString();
 
+  // Propagate media updates to playlists & notify active players
+  for (const pl of data.playlists) {
+    if (pl.company_id === media.company_id && Array.isArray(pl.items)) {
+      let touched = false;
+      for (const it of pl.items) {
+        if (it.media_id === media.id) {
+          if (name !== undefined) it.name = media.name;
+          if (type !== undefined) it.type = media.type;
+          if (file_url !== undefined) it.file_url = resolveBestMediaFileUrl(media, it.file_url);
+          if (duration !== undefined) it.duration = media.duration;
+          touched = true;
+        }
+      }
+      if (touched) {
+        pl.updated_at = media.updated_at;
+      }
+    }
+  }
+
   db.persist();
+  saveDatabaseToFirestoreNow(data).catch(() => {});
+
+  try {
+    realtimeHub.broadcastMediaChange(media.company_id, 'updated', media);
+    realtimeHub.sendRestartCommand({
+      companyId: media.company_id,
+      explicitRestart: false,
+      reason: `Mídia "${media.name}" atualizada`,
+    });
+  } catch {}
+
   res.json(media);
 });
 
@@ -3972,7 +4105,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
 
           const mediaType = m?.type || (isWeather ? 'weather_clock' : it.type) || (it.file_url?.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'image');
           const mediaName = m?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia');
-          const mediaFileUrl = m?.file_url || (isWeather ? 'widget:weather_clock' : (it.file_url || ''));
+          const mediaFileUrl = resolveBestMediaFileUrl(m, it.file_url, isWeather);
           const mediaLocalUrl = m?.local_url || (it as any).local_url || (mediaFileUrl?.startsWith('/uploads/') ? mediaFileUrl : undefined);
 
           // If no media object and no file_url, and not weather_clock/rss, skip invalid item
@@ -3982,10 +4115,11 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
             id: it.id,
             media_id: it.media_id,
             position: it.position,
-            duration: it.duration || m?.duration || (mediaType === 'video' ? 15 : 10),
+            duration: Number(it.duration) || m?.duration || (mediaType === 'video' ? 15 : 10),
             name: mediaName,
             type: mediaType,
             file_url: mediaFileUrl,
+            r2_url: (m as any)?.r2_url || (it as any).r2_url || undefined,
             local_url: mediaLocalUrl,
             drive_file_id: m?.drive_file_id || (it as any).drive_file_id,
             drive_view_url: m?.drive_view_url || (it as any).drive_view_url,
@@ -4007,6 +4141,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
 
   // Active RSS feeds
   const rssFeeds = data.rss_feeds.filter((r) => r.company_id === player?.company_id && r.active && !isItemObjectDeleted(data, r));
+  const syncVersion = computePlayerSyncVersion(data, player, playlist);
 
   res.json({
     player: {
@@ -4036,6 +4171,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
       ? {
           id: playlist.id,
           name: playlist.name,
+          updated_at: playlist.updated_at,
           weather_city: playlist.weather_city || company.city || 'São Paulo',
           // Sugestão 3: Transições
           transition_effect: playlist.transition_effect || 'crossfade',
@@ -4050,6 +4186,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
     weatherCity: playlist?.weather_city || company.city || 'São Paulo',
     items: itemsWithMedia,
     rssFeeds,
+    syncVersion,
   });
 });
 
@@ -4302,43 +4439,67 @@ apiRouter.get('/player/active-call', (req, res) => {
   const playerId = (req.query.playerId as string)?.trim();
   const playerCode = (req.query.code as string)?.trim();
   const token = (req.query.token as string)?.trim();
+  const data = db.getData();
 
   let target = playerId;
-  if (!target && token) {
+  let resolvedPlayer: Player | undefined;
+
+  if (target) {
+    const tLower = target.toLowerCase();
+    resolvedPlayer = data.players.find(
+      (p) => p.id.toLowerCase() === tLower || p.code.toLowerCase() === tLower
+    );
+  }
+  if (!resolvedPlayer && token) {
     const foundSession = db.getSession(token);
-    if (foundSession) {
-      target = foundSession.playerId;
-    } else {
-      const data = db.getData();
-      const pl = data.players.find(
+    if (foundSession?.playerId) {
+      resolvedPlayer = data.players.find((p) => p.id === foundSession.playerId);
+      if (resolvedPlayer) target = resolvedPlayer.id;
+    }
+    if (!resolvedPlayer) {
+      resolvedPlayer = data.players.find(
         (p) =>
           p.access_token === token ||
           p.code.toLowerCase() === token.toLowerCase() ||
           p.id === token
       );
-      if (pl) target = pl.id;
+      if (resolvedPlayer) target = resolvedPlayer.id;
     }
   }
-  if (!target && playerCode) {
-    target = playerCode;
+  if (!resolvedPlayer && playerCode) {
+    const cLower = playerCode.toLowerCase();
+    resolvedPlayer = data.players.find(
+      (p) => p.code.toLowerCase() === cLower || p.id.toLowerCase() === cLower
+    );
+    if (resolvedPlayer) target = resolvedPlayer.id;
+    else if (!target) target = playerCode;
   }
-  if (!target) {
-    const data = db.getData();
-    const pl = data.players.find((p) => p.status === 'active') || data.players[0];
-    if (pl) target = pl.id;
+  if (!resolvedPlayer && !target) {
+    resolvedPlayer = data.players.find((p) => p.status === 'active') || data.players[0];
+    if (resolvedPlayer) target = resolvedPlayer.id;
   }
 
   if (!target) {
-    return res.json({ activeCall: null, pendingRestart: null });
+    return res.json({ activeCall: null, pendingRestart: null, syncVersion: null });
   }
 
   const activeCall = realtimeHub.getActiveCall(target);
-  const companyId = (req.query.companyId as string)?.trim();
-  const pendingRestart = realtimeHub.checkAndClearPendingRestart(target, companyId);
+  const companyId = ((req.query.companyId as string)?.trim()) || resolvedPlayer?.company_id;
+  const activePlaylist = resolvedPlayer?.playlist_id
+    ? data.playlists.find((pl) => pl.id === resolvedPlayer!.playlist_id && pl.active !== false)
+    : undefined;
+  const pendingRestart = realtimeHub.checkAndClearPendingRestart(
+    resolvedPlayer?.id || target,
+    companyId,
+    activePlaylist?.id
+  );
+  const syncVersion = resolvedPlayer ? computePlayerSyncVersion(data, resolvedPlayer, activePlaylist) : undefined;
+
   res.json({
     activeCall,
     pendingRestart,
     reloadPlaylist: !!pendingRestart,
+    syncVersion,
   });
 });
 
@@ -4356,6 +4517,7 @@ apiRouter.post('/player/restart', requireAuth, (req: AuthenticatedRequest, res) 
       playlistId,
       companyId: effectiveCompanyId,
       fullReload: !!fullReload,
+      explicitRestart: true,
       reason: reason || 'Comando de reinicialização enviado pelo painel',
     });
 
@@ -5751,6 +5913,14 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Cache-Control', 'public, max-age=3600');
 
+        if (req.method === 'HEAD') {
+          res.writeHead(200, {
+            'Content-Length': fileSize,
+            'Content-Type': contentType,
+          });
+          return res.end();
+        }
+
         if (rangeHeader) {
           const parts = rangeHeader.replace(/bytes=/, '').split('-');
           const start = parseInt(parts[0], 10);
@@ -5773,9 +5943,22 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       }
     }
 
+    // 1.5. Fast redirect to direct public Cloudflare R2 URL when no local copy exists and proxy is not forced
+    const directR2Url =
+      ((media as any)?.r2_url && String((media as any).r2_url).startsWith('http'))
+        ? String((media as any).r2_url)
+        : (media?.file_url && String(media.file_url).startsWith('http') && !String(media.file_url).includes('drive.google.com'))
+        ? String(media.file_url)
+        : '';
+
+    if (directR2Url && req.query.proxy !== '1') {
+      return res.redirect(302, directR2Url);
+    }
+
     // 2. Try Cloudflare R2 object
     const targetKey = (media as any)?.r2_url || media?.file_url || (media as any)?.local_url || id;
-    const r2Obj = await getObjectFromR2(targetKey, rangeHeader ? String(rangeHeader) : undefined);
+    const effectiveRange = req.method === 'HEAD' ? 'bytes=0-0' : (rangeHeader ? String(rangeHeader) : undefined);
+    const r2Obj = await getObjectFromR2(targetKey, effectiveRange);
     if (r2Obj && r2Obj.body) {
       const keyOrName = ((media as any)?.unique_name || media?.name || targetKey || id || '').toLowerCase();
       const isVideo = media?.type === 'video' || keyOrName.endsWith('.mp4') || keyOrName.endsWith('.webm') || keyOrName.endsWith('.avi') || keyOrName.endsWith('.mov');
@@ -5787,8 +5970,22 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Content-Type', determinedContentType);
-      if (r2Obj.contentLength) res.setHeader('Content-Length', r2Obj.contentLength);
-      if (r2Obj.contentRange) res.setHeader('Content-Range', r2Obj.contentRange);
+      const totalFromRange = r2Obj.contentRange?.split('/')?.[1];
+      if (req.method === 'HEAD' && totalFromRange && /^\d+$/.test(totalFromRange)) {
+        res.setHeader('Content-Length', totalFromRange);
+      } else if (r2Obj.contentLength) {
+        res.setHeader('Content-Length', r2Obj.contentLength);
+      }
+      if (r2Obj.contentRange && req.method !== 'HEAD') res.setHeader('Content-Range', r2Obj.contentRange);
+
+      if (req.method === 'HEAD') {
+        try {
+          if (typeof (r2Obj.body as any).destroy === 'function') (r2Obj.body as any).destroy();
+          else if (typeof (r2Obj.body as any).cancel === 'function') (r2Obj.body as any).cancel().catch(() => {});
+        } catch {}
+        return res.status(200).end();
+      }
+
       res.status(r2Obj.status);
 
       // Cache full file to uploadsDir in background for local playback & offline mode
