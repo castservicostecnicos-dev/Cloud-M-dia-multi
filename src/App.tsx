@@ -11,7 +11,13 @@ import { ToastContainer, ToastMessage } from './components/Toast';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PresentationModal } from './components/PresentationModal';
 import { KeyRound, X, LogOut } from 'lucide-react';
-import { initDeviceBackNavigation, setExitPromptCallback, registerBackHandler } from './lib/backNavigation';
+import {
+  initDeviceBackNavigation,
+  setExitPromptCallback,
+  setExitModalBackHandler,
+  registerBackHandler,
+  allowAppExitAndGoBack,
+} from './lib/backNavigation';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -53,13 +59,17 @@ export default function App() {
     });
   }, []);
 
-  // Back handler for exit confirmation modal itself
+  // Back handler for exit confirmation modal itself (always top priority)
   useEffect(() => {
-    if (!exitConfirmOpen) return;
-    return registerBackHandler(() => {
+    if (!exitConfirmOpen) {
+      setExitModalBackHandler(null);
+      return;
+    }
+    setExitModalBackHandler(() => {
       setExitConfirmOpen(false);
       return true;
     });
+    return () => setExitModalBackHandler(null);
   }, [exitConfirmOpen]);
 
   // Back handler for simulated player view
@@ -297,6 +307,64 @@ export default function App() {
   const urlPlayerParam = searchParams?.get('player') || searchParams?.get('playerCode') || null;
   const urlTokenParam = searchParams?.get('token') || searchParams?.get('player_token') || null;
 
+  const isDirectPlayerMode = Boolean(urlPlayerParam || urlTokenParam);
+  const exitModalDescription = isDirectPlayerMode
+    ? 'Deseja realmente sair da tela do reprodutor?'
+    : simulatedPlayerCode
+    ? 'Deseja realmente sair da pré-visualização do reprodutor?'
+    : user?.role === 'player'
+    ? 'Deseja realmente desconectar e sair da tela do reprodutor?'
+    : user
+    ? 'Você está na tela inicial. Deseja realmente encerrar a sessão e sair do aplicativo?'
+    : 'Deseja realmente sair do aplicativo?';
+
+  const handleConfirmAppExit = () => {
+    setExitConfirmOpen(false);
+    if (isDirectPlayerMode) {
+      window.location.search = '';
+      return;
+    }
+    if (simulatedPlayerCode) {
+      setSimulatedPlayerCode(null);
+      return;
+    }
+    if (user) {
+      handleLogout();
+      return;
+    }
+    allowAppExitAndGoBack();
+  };
+
+  const exitConfirmModal = exitConfirmOpen ? (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs animate-in fade-in duration-150">
+      <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl text-slate-100 text-center animate-in zoom-in-95 duration-150">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400">
+          <LogOut className="h-7 w-7" />
+        </div>
+        <h3 className="text-lg font-bold text-white mb-2">Deseja sair do aplicativo?</h3>
+        <p className="text-xs text-slate-400 leading-relaxed mb-6">
+          {exitModalDescription}
+        </p>
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => setExitConfirmOpen(false)}
+            className="flex-1 py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition cursor-pointer"
+          >
+            Continuar no App
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirmAppExit}
+            className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-md"
+          >
+            Sair
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   if (urlPlayerParam || urlTokenParam) {
     return (
       <div className="fixed inset-0 z-50 bg-black">
@@ -307,6 +375,7 @@ export default function App() {
             window.location.search = '';
           }}
         />
+        {exitConfirmModal}
       </div>
     );
   }
@@ -330,6 +399,7 @@ export default function App() {
         >
           Demorando para responder? Ir para o início
         </button>
+        {exitConfirmModal}
       </div>
     );
   }
@@ -344,6 +414,7 @@ export default function App() {
           onLoginSuccess={handleLoginSuccess}
           showToast={showToast}
         />
+        {exitConfirmModal}
       </>
     );
   }
@@ -354,6 +425,7 @@ export default function App() {
       <>
         <OfflineIndicator />
         <PlayerView onExit={handleLogout} />
+        {exitConfirmModal}
       </>
     );
   }
@@ -366,6 +438,7 @@ export default function App() {
           overridePlayerCode={simulatedPlayerCode}
           onExit={() => setSimulatedPlayerCode(null)}
         />
+        {exitConfirmModal}
       </div>
     );
   }
@@ -489,38 +562,7 @@ export default function App() {
       />
 
       {/* MODAL DE CONFIRMAÇÃO DE SAÍDA (Acionado pela tecla voltar do dispositivo) */}
-      {exitConfirmOpen && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 p-4 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl text-slate-100 text-center animate-in zoom-in-95 duration-150">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400">
-              <LogOut className="h-7 w-7" />
-            </div>
-            <h3 className="text-lg font-bold text-white mb-2">Deseja sair do aplicativo?</h3>
-            <p className="text-xs text-slate-400 leading-relaxed mb-6">
-              Você está na tela inicial. Deseja realmente encerrar a sessão e sair do aplicativo?
-            </p>
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setExitConfirmOpen(false)}
-                className="flex-1 py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs transition cursor-pointer"
-              >
-                Continuar no App
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setExitConfirmOpen(false);
-                  handleLogout();
-                }}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-md"
-              >
-                Sair
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {exitConfirmModal}
     </div>
   );
 }

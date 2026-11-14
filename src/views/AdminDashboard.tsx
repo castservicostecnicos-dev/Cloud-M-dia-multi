@@ -52,6 +52,7 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { GoogleDriveFileManager } from '../components/GoogleDriveFileManager';
 import { CloudflareR2ConfigModal } from '../components/CloudflareR2ConfigModal';
 import { CommercialProofOfPlayModal } from '../components/CommercialProofOfPlayModal';
+import { registerBackHandler } from '../lib/backNavigation';
 
 interface AdminDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -217,6 +218,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     message: '',
     action: () => {},
   });
+
+  useEffect(() => {
+    return registerBackHandler(() => {
+      if (confirmData.isOpen) {
+        setConfirmData((prev) => ({ ...prev, isOpen: false }));
+        return true;
+      }
+      if (r2ModalOpen) {
+        setR2ModalOpen(false);
+        return true;
+      }
+      if (adminCommercialModalOpen) {
+        setAdminCommercialModalOpen(false);
+        return true;
+      }
+      if (resetModalOpen) {
+        setResetModalOpen(false);
+        return true;
+      }
+      if (planModalOpen) {
+        setPlanModalOpen(false);
+        return true;
+      }
+      if (companyModalOpen) {
+        setCompanyModalOpen(false);
+        return true;
+      }
+      if (activeTab !== 'dashboard') {
+        setActiveTab('dashboard');
+        return true;
+      }
+      return false;
+    });
+  }, [
+    confirmData.isOpen,
+    r2ModalOpen,
+    adminCommercialModalOpen,
+    resetModalOpen,
+    planModalOpen,
+    companyModalOpen,
+    activeTab,
+  ]);
 
   // Search and filter for companies (Mobile and Desktop)
   const [companySearch, setCompanySearch] = useState('');

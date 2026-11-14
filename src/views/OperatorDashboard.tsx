@@ -21,6 +21,7 @@ import {
 import { api } from '../lib/api';
 import { playCallAlert, stopCallAlert, unlockAudio, preloadPhraseAudio } from '../lib/audio';
 import { PlayerDiagnosticView, DiagnosticPlayerData } from '../components/PlayerDiagnosticView';
+import { registerBackHandler } from '../lib/backNavigation';
 
 interface OperatorDashboardProps {
   showToast: (type: 'success' | 'error' | 'info', message: string) => void;
@@ -33,6 +34,16 @@ export const OperatorDashboard: React.FC<OperatorDashboardProps> = ({
 }) => {
   // Aba ativa: 'calls' (prioridade máxima, na primeira posição) ou 'diagnostic'
   const [activeTab, setActiveTab] = useState<'calls' | 'diagnostic'>('calls');
+
+  useEffect(() => {
+    return registerBackHandler(() => {
+      if (activeTab !== 'calls') {
+        setActiveTab('calls');
+        return true;
+      }
+      return false;
+    });
+  }, [activeTab]);
 
   const [players, setPlayers] = useState<DiagnosticPlayerData[]>([]);
 
