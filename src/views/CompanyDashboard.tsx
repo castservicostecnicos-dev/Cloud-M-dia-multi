@@ -556,7 +556,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [selectedPlaylistIdsForMedia, setSelectedPlaylistIdsForMedia] = useState<string[]>([]);
   const [isAddingToPlaylists, setIsAddingToPlaylists] = useState(false);
   const [choosePlaylistsRestart, setChoosePlaylistsRestart] = useState<boolean>(true);
-  const [choosePlaylistsDuplicate, setChoosePlaylistsDuplicate] = useState<boolean>(false);
+
+  const dedupeItemsByMediaId = <T extends Record<string, any>>(items: T[]): T[] => {
+    const seen = new Set<string>();
+    const result: T[] = [];
+    for (const it of items || []) {
+      const key = it.media_id ? `media:${it.media_id}` : `item:${it.id || result.length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(it);
+    }
+    return result;
+  };
 
   // Backwards compatible aliases
   const addToAllPlaylistsModalMedia = choosePlaylistsModalMedia;
@@ -566,7 +577,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const openChoosePlaylistsModal = (media: Media) => {
     setChoosePlaylistsModalMedia(media);
     setChoosePlaylistsRestart(true);
-    setChoosePlaylistsDuplicate(false);
     // Pre-selecionar playlists que já possuem esta mídia
     const memberIds = playlists
       .filter((pl) => pl.items && pl.items.some((it) => it.media_id === media.id))
@@ -605,7 +615,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         const alreadyHas = pl.items && pl.items.some((it) => it.media_id === media.id);
 
         if (isSelected) {
-          if (!alreadyHas || choosePlaylistsDuplicate) {
+          if (!alreadyHas) {
             const newItem: PlaylistItem = {
               id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               playlist_id: pl.id,
@@ -617,7 +627,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               file_url: media.file_url,
               created_at: nowStr,
             };
-            const updatedItems = [...(pl.items || []), newItem].map((it, idx) => ({ ...it, position: idx + 1 }));
+            const updatedItems = dedupeItemsByMediaId([...(pl.items || []), newItem]).map((it, idx) => ({
+              ...it,
+              position: idx + 1,
+            }));
             await api.updateCompanyPlaylist(pl.id, {
               ...pl,
               items: updatedItems,
@@ -628,9 +641,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         } else {
           // Desmarcada: remove da playlist se estiver presente para refletir com precisão a escolha
           if (alreadyHas) {
-            const updatedItems = (pl.items || [])
-              .filter((it) => it.media_id !== media.id)
-              .map((it, idx) => ({ ...it, position: idx + 1 }));
+            const updatedItems = dedupeItemsByMediaId(
+              (pl.items || []).filter((it) => it.media_id !== media.id)
+            ).map((it, idx) => ({ ...it, position: idx + 1 }));
             await api.updateCompanyPlaylist(pl.id, {
               ...pl,
               items: updatedItems,
@@ -1414,7 +1427,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         custom_ticker_text: playlist.custom_ticker_text || '',
         custom_ticker_bg_color: playlist.custom_ticker_bg_color || '#0f172a',
         custom_ticker_speed: playlist.custom_ticker_speed || 2,
-        items: playlist.items.map((it) => {
+        items: dedupeItemsByMediaId(playlist.items || []).map((it) => {
           const matchedMedia = mediaList.find((m) => m.id === it.media_id);
           return {
             id: it.id,
@@ -1542,9 +1555,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const handleSavePlaylist = async (e: React.FormEvent, andRestart = false) => {
     e.preventDefault();
     try {
+      const dedupedItems = dedupeItemsByMediaId(playlistForm.items);
       const payload = {
         ...playlistForm,
-        items: playlistForm.items.map((it, idx) => ({
+        items: dedupedItems.map((it, idx) => ({
           ...it,
           media_id: it.media_id,
           position: idx + 1,
@@ -1598,6 +1612,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   };
 
   const handleSelectMediaForPlaylist = (media: Media) => {
+    const alreadyExists = playlistForm.items.some((it) => it.media_id === media.id);
+    if (alreadyExists) {
+      showToast('info', `A mídia "${media.name}" já está incluída nesta playlist.`);
+      setMediaPickerModalOpen(false);
+      return;
+    }
     const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -1607,19 +1627,22 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       type: media.type,
       file_url: media.file_url,
     };
-    setPlaylistForm((prev) => ({
-      ...prev,
-      items: [
-        ...prev.items,
-        newItem,
-      ],
-    }));
+    setPlaylistForm((prev) => {
+      if (prev.items.some((it) => it.media_id === media.id)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        items: dedupeItemsByMediaId([...prev.items, newItem]),
+      };
+    });
     showToast('success', `Mídia "${media.name}" adicionada à playlist. Lembre-se de salvar a playlist para confirmar.`);
     setMediaPickerModalOpen(false);
   };
 
   const handleSelectMediaForPlaylistAndRestart = async (media: Media) => {
     const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
+    const alreadyExists = playlistForm.items.some((it) => it.media_id === media.id);
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       media_id: media.id,
@@ -1628,10 +1651,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       type: media.type,
       file_url: media.file_url,
     };
-    const updatedFormItems = [...playlistForm.items, newItem];
+    const updatedFormItems = alreadyExists
+      ? dedupeItemsByMediaId(playlistForm.items)
+      : dedupeItemsByMediaId([...playlistForm.items, newItem]);
     setPlaylistForm((prev) => ({
       ...prev,
-      items: updatedFormItems,
+      items: dedupeItemsByMediaId(
+        prev.items.some((it) => it.media_id === media.id) ? prev.items : [...prev.items, newItem]
+      ),
     }));
     setMediaPickerModalOpen(false);
 
@@ -1655,15 +1682,27 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         broadcastLocalPlaylistUpdate({
           playlistId: editingPlaylist.id,
           explicitRestart: true,
-          reason: `Mídia "${media.name}" adicionada à playlist "${editingPlaylist.name}"`,
+          reason: alreadyExists
+            ? `Playlist "${editingPlaylist.name}" sincronizada`
+            : `Mídia "${media.name}" adicionada à playlist "${editingPlaylist.name}"`,
         });
-        showToast('success', `Mídia "${media.name}" salva na playlist "${editingPlaylist.name}" e reprodutores reiniciados!`);
+        showToast(
+          'success',
+          alreadyExists
+            ? `Mídia "${media.name}" já estava na playlist "${editingPlaylist.name}". Reprodutores reiniciados!`
+            : `Mídia "${media.name}" salva na playlist "${editingPlaylist.name}" e reprodutores reiniciados!`
+        );
         loadData();
       } catch (err: any) {
         showToast('error', `Falha ao salvar playlist: ${err.message}`);
       }
     } else {
-      showToast('success', `Mídia "${media.name}" incluída na playlist!`);
+      showToast(
+        'success',
+        alreadyExists
+          ? `Mídia "${media.name}" já está incluída na playlist!`
+          : `Mídia "${media.name}" incluída na playlist!`
+      );
       await handleRestartPlayers({});
     }
   };
@@ -1686,20 +1725,33 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
     }
 
-    setPlaylistForm((prev) => ({
-      ...prev,
-      items: [
-        ...prev.items,
-        {
-          id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          media_id: weatherMedia!.id,
-          name: weatherMedia!.name,
-          type: 'weather_clock',
-          file_url: 'widget:weather_clock',
-          duration: 12,
-        },
-      ],
-    }));
+    const alreadyExists = playlistForm.items.some(
+      (it) => it.media_id === weatherMedia!.id || it.type === 'weather_clock'
+    );
+    if (alreadyExists) {
+      showToast('info', 'Hora Certa & Previsão do Tempo já está incluída nesta playlist.');
+      return;
+    }
+
+    setPlaylistForm((prev) => {
+      if (prev.items.some((it) => it.media_id === weatherMedia!.id || it.type === 'weather_clock')) {
+        return prev;
+      }
+      return {
+        ...prev,
+        items: dedupeItemsByMediaId([
+          ...prev.items,
+          {
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            media_id: weatherMedia!.id,
+            name: weatherMedia!.name,
+            type: 'weather_clock',
+            file_url: 'widget:weather_clock',
+            duration: 12,
+          },
+        ]),
+      };
+    });
     showToast('success', '🌤️ Hora Certa & Previsão do Tempo adicionada à sequência da playlist!');
   };
 
@@ -1721,16 +1773,32 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
     }
 
-    setPlaylistForm((prev) => ({
-      ...prev,
-      items: [
-        ...prev.items,
-        {
-          media_id: rssMedia!.id,
-          duration: 15,
-        },
-      ],
-    }));
+    const alreadyExists = playlistForm.items.some((it) => it.media_id === rssMedia!.id);
+    if (alreadyExists) {
+      setRssQuickPickerOpen(false);
+      showToast('info', `Notícias RSS "${rssName}" já estão incluídas nesta playlist.`);
+      return;
+    }
+
+    setPlaylistForm((prev) => {
+      if (prev.items.some((it) => it.media_id === rssMedia!.id)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        items: dedupeItemsByMediaId([
+          ...prev.items,
+          {
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            media_id: rssMedia!.id,
+            name: rssMedia!.name,
+            type: 'rss',
+            file_url: rssMedia!.file_url,
+            duration: 15,
+          },
+        ]),
+      };
+    });
     setRssQuickPickerOpen(false);
     showToast('success', `📰 Notícias RSS "${rssName}" adicionadas à playlist!`);
   };
@@ -1908,13 +1976,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         targetPlaylistIdForNewMedia === '__ALL_PLAYLISTS__' ||
         (targetPlaylistIdsForNewMedia.length === playlists.length && playlists.length > 0);
 
-      const targetPlIds = isTargetAllPlaylists
-        ? playlists.map((p) => p.id)
-        : targetPlaylistIdsForNewMedia.length > 0
-        ? targetPlaylistIdsForNewMedia
-        : targetPlaylistIdForNewMedia
-        ? [targetPlaylistIdForNewMedia]
-        : (editingPlaylist ? [editingPlaylist.id] : []);
+      const uniqueTargetPlIds = Array.from(
+        new Set(
+          isTargetAllPlaylists
+            ? playlists.map((p) => p.id)
+            : targetPlaylistIdsForNewMedia.length > 0
+            ? targetPlaylistIdsForNewMedia
+            : targetPlaylistIdForNewMedia
+            ? [targetPlaylistIdForNewMedia]
+            : (editingPlaylist ? [editingPlaylist.id] : [])
+        )
+      );
 
       if (mediaSourceType === 'device') {
         if (selectedDeviceFiles.length === 0) {
@@ -1944,7 +2016,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               name: fileTitle,
               duration: Number(fileItem.duration) || (fileItem.isVideo ? 15 : 10),
               companyId: currentCompanyId,
-              addToAllPlaylists: isTargetAllPlaylists,
+              addToAllPlaylists: false,
               clientDriveToken: currentToken,
               onProgress: (pct) => {
                 const stepBase = (i / totalFiles) * 100;
@@ -2010,7 +2082,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           type: mediaSourceType === 'weather_clock' ? 'weather_clock' : mediaSourceType === 'rss' ? 'rss' : mediaForm.type,
           file_url: targetFileUrl,
           duration: itemDuration,
-          addToAllPlaylists: isTargetAllPlaylists,
+          addToAllPlaylists: false,
         });
 
         if (created) {
@@ -2030,14 +2102,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         ...prev.filter((m) => !createdMedias.some((cm) => cm.id === m.id)),
       ]);
 
-      // VINCULAR MÍDIAS ÀS PLAYLISTS SELECIONADAS
+      // VINCULAR MÍDIAS ÀS PLAYLISTS SELECIONADAS (garantindo sem duplicatas)
       const nowStr = new Date().toISOString();
-      for (const targetId of targetPlIds) {
+      for (const targetId of uniqueTargetPlIds) {
         const pl = playlists.find((p) => p.id === targetId);
         if (!pl) continue;
 
-        let currentPlItems = [...(pl.items || [])];
+        let currentPlItems = dedupeItemsByMediaId([...(pl.items || [])]);
         for (const created of createdMedias) {
+          if (currentPlItems.some((it) => it.media_id === created.id)) {
+            continue;
+          }
           const itemDuration = Number(created.duration) || (created.type === 'rss' ? 15 : 10);
           const newItem: PlaylistItem = {
             id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2054,24 +2129,26 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         }
 
         // Reordenar posições
-        const updatedItems = currentPlItems.map((it, idx) => ({ ...it, position: idx + 1 }));
+        const updatedItems = dedupeItemsByMediaId(currentPlItems).map((it, idx) => ({ ...it, position: idx + 1 }));
 
         // Atualizar no formulário se for a playlist em edição
         if (playlistModalOpen && editingPlaylist?.id === pl.id) {
-          setPlaylistForm((prev) => ({
-            ...prev,
-            items: [
-              ...prev.items,
-              ...createdMedias.map((cm) => ({
+          setPlaylistForm((prev) => {
+            const newFormItems = createdMedias
+              .filter((cm) => !prev.items.some((it) => it.media_id === cm.id))
+              .map((cm) => ({
                 id: `pli-${Date.now()}-${cm.id}`,
                 media_id: cm.id,
                 duration: Number(cm.duration) || 10,
                 name: cm.name,
                 type: cm.type,
                 file_url: cm.file_url,
-              })),
-            ],
-          }));
+              }));
+            return {
+              ...prev,
+              items: dedupeItemsByMediaId([...prev.items, ...newFormItems]),
+            };
+          });
           setEditingPlaylist((prev) => (prev ? { ...prev, items: updatedItems } : null));
         }
 
@@ -2089,7 +2166,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         }
       }
 
-      if (targetPlIds.length > 0) {
+      if (uniqueTargetPlIds.length > 0) {
         broadcastLocalPlaylistUpdate({
           explicitRestart: andRestart,
           reason: 'Novas mídias vinculadas à playlist',
@@ -2101,8 +2178,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         await handleRestartPlayers({});
       }
 
-      const plMsg = targetPlIds.length > 0
-        ? ` e vinculada(s) a ${targetPlIds.length} playlist(s)`
+      const plMsg = uniqueTargetPlIds.length > 0
+        ? ` e vinculada(s) a ${uniqueTargetPlIds.length} playlist(s)`
         : '';
       showToast(
         'success',
@@ -5840,12 +5917,16 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
                   {filteredPickerMedia.map((m) => {
-                    const timesInPlaylist = playlistForm.items.filter((it) => it.media_id === m.id).length;
+                    const alreadyInPlaylist = playlistForm.items.some((it) => it.media_id === m.id);
                     return (
                       <div
                         key={m.id}
                         onClick={() => handleSelectMediaForPlaylist(m)}
-                        className="group relative rounded-xl border border-slate-700/80 bg-slate-800/80 hover:bg-slate-800 hover:border-blue-500 hover:shadow-lg transition cursor-pointer overflow-hidden flex flex-col justify-between"
+                        className={`group relative rounded-xl border bg-slate-800/80 hover:bg-slate-800 transition overflow-hidden flex flex-col justify-between ${
+                          alreadyInPlaylist
+                            ? 'border-emerald-500/60 opacity-90 cursor-default'
+                            : 'border-slate-700/80 hover:border-blue-500 hover:shadow-lg cursor-pointer'
+                        }`}
                       >
                         {/* Media Visual Preview */}
                         <div className="relative aspect-video w-full bg-slate-950 overflow-hidden flex items-center justify-center">
@@ -5859,9 +5940,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                           />
 
                           {/* Badge se já está na playlist */}
-                          {timesInPlaylist > 0 && (
+                          {alreadyInPlaylist && (
                             <span className="absolute bottom-2 left-2 rounded-md bg-emerald-600/90 border border-emerald-500 text-[10px] font-bold text-white px-2 py-0.5 flex items-center gap-1 shadow-md z-10">
-                              <Check className="h-3 w-3" /> Na Playlist ({timesInPlaylist}x)
+                              <Check className="h-3 w-3" /> Na Playlist
                             </span>
                           )}
                         </div>
@@ -5893,17 +5974,37 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                                   handleSelectMediaForPlaylistAndRestart(m);
                                 }}
                                 className="px-2 py-1 rounded-md bg-indigo-600/80 hover:bg-indigo-600 text-indigo-100 hover:text-white font-bold text-[11px] flex items-center gap-1 transition shadow-xs cursor-pointer"
-                                title="Adiciona esta mídia à playlist e reinicia o player imediatamente"
+                                title={
+                                  alreadyInPlaylist
+                                    ? 'Sincroniza a playlist e reinicia o player imediatamente'
+                                    : 'Adiciona esta mídia à playlist e reinicia o player imediatamente'
+                                }
                               >
                                 <RefreshCw className="h-3 w-3" />
-                                <span>+ Reiniciar</span>
+                                <span>{alreadyInPlaylist ? 'Reiniciar' : '+ Reiniciar'}</span>
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleSelectMediaForPlaylist(m)}
-                                className="px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] flex items-center gap-1 transition shadow-xs cursor-pointer"
+                                disabled={alreadyInPlaylist}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSelectMediaForPlaylist(m);
+                                }}
+                                className={`px-2.5 py-1 rounded-md font-bold text-[11px] flex items-center gap-1 transition shadow-xs ${
+                                  alreadyInPlaylist
+                                    ? 'bg-emerald-700/60 text-emerald-200 cursor-not-allowed'
+                                    : 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
+                                }`}
                               >
-                                <Plus className="h-3 w-3" /> Escolher
+                                {alreadyInPlaylist ? (
+                                  <>
+                                    <Check className="h-3 w-3" /> Incluída
+                                  </>
+                                ) : (
+                                  <>
+                                    <Plus className="h-3 w-3" /> Escolher
+                                  </>
+                                )}
                               </button>
                             </div>
                           </div>
@@ -7380,19 +7481,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
               {/* Opções */}
               <div className="space-y-3 bg-slate-800/60 rounded-xl p-3.5 border border-slate-700/60">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="chk-duplicate-all-pl"
-                    checked={choosePlaylistsDuplicate}
-                    onChange={(e) => setChoosePlaylistsDuplicate(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-600 text-amber-500 focus:ring-amber-400 cursor-pointer"
-                  />
-                  <label htmlFor="chk-duplicate-all-pl" className="text-xs text-slate-300 cursor-pointer">
-                    Permitir duplicar mídia se já estiver na playlist
-                  </label>
-                </div>
-
                 <div className="flex items-center gap-2">
                   <input
                     type="checkbox"

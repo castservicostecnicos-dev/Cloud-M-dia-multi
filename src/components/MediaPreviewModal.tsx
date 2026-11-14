@@ -433,16 +433,22 @@ export const MediaPreviewModal: React.FC<MediaPreviewModalProps> = ({
             {onAddToPlaylist && (
               <button
                 type="button"
+                disabled={isAlreadyInPlaylist}
                 onClick={() => {
+                  if (isAlreadyInPlaylist) return;
                   onAddToPlaylist(media);
                   onClose();
                 }}
-                className="w-full sm:w-auto justify-center min-h-[40px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-2 transition cursor-pointer shadow-md text-center"
+                className={`w-full sm:w-auto justify-center min-h-[40px] px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition shadow-md text-center ${
+                  isAlreadyInPlaylist
+                    ? 'bg-emerald-700/60 text-emerald-100 cursor-not-allowed opacity-80'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white cursor-pointer'
+                }`}
               >
                 {isAlreadyInPlaylist ? (
                   <>
                     <Check className="h-4 w-4 text-emerald-300 shrink-0" />
-                    <span>Adicionar Novamente</span>
+                    <span>Já está na Playlist</span>
                   </>
                 ) : (
                   <>

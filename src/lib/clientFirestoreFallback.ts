@@ -217,10 +217,22 @@ function normalizeDbShape(parsed: any) {
     normalized.media = normalized.media.filter((m: any) => !isDeleted(m));
   }
   if (Array.isArray(normalized.playlists)) {
-    normalized.playlists = normalized.playlists.map((pl: any) => ({
-      ...pl,
-      items: (pl.items || []).filter((it: any) => !isDeleted(it)),
-    }));
+    normalized.playlists = normalized.playlists.map((pl: any) => {
+      const seenIds = new Set<string>();
+      const cleanItems = (pl.items || [])
+        .filter((it: any) => !isDeleted(it))
+        .filter((it: any, idx: number) => {
+          const k = it.media_id ? `media:${it.media_id}` : `item:${it.id || idx}`;
+          if (seenIds.has(k)) return false;
+          seenIds.add(k);
+          return true;
+        })
+        .map((it: any, idx: number) => ({ ...it, position: idx + 1 }));
+      return {
+        ...pl,
+        items: cleanItems,
+      };
+    });
   }
   if (Array.isArray(normalized.rss_feeds)) {
     normalized.rss_feeds = normalized.rss_feeds.filter((r: any) => !isDeleted(r));
@@ -1208,23 +1220,28 @@ export async function handleClientFallbackRequest(
       const itemDuration = Number(body.duration) || newMedia.duration || 10;
       dbData.playlists = (dbData.playlists || []).map((pl: any) => {
         if (pl.company_id !== activeCompanyId) return pl;
+        const existingItems = (pl.items || []).filter((it: any, idx: number, arr: any[]) =>
+          arr.findIndex((x) => (x.media_id ? x.media_id === it.media_id : x.id === it.id)) === idx
+        );
+        if (existingItems.some((it: any) => it.media_id === newMedia.id)) return pl;
+        const nextItems = [
+          ...existingItems,
+          {
+            id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            playlist_id: pl.id,
+            media_id: newMedia.id,
+            position: existingItems.length + 1,
+            duration: itemDuration,
+            name: newMedia.name,
+            type: newMedia.type,
+            file_url: newMedia.file_url,
+            created_at: nowStr,
+          },
+        ].map((it: any, idx: number) => ({ ...it, position: idx + 1 }));
         return {
           ...pl,
           updated_at: nowStr,
-          items: [
-            ...(pl.items || []),
-            {
-              id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-              playlist_id: pl.id,
-              media_id: newMedia.id,
-              position: (pl.items?.length || 0) + 1,
-              duration: itemDuration,
-              name: newMedia.name,
-              type: newMedia.type,
-              file_url: newMedia.file_url,
-              created_at: nowStr,
-            },
-          ],
+          items: nextItems,
         };
       });
     }
@@ -1237,28 +1254,31 @@ export async function handleClientFallbackRequest(
     const medId = pathOnly.split('/')[3];
     const targetMedia = (dbData.media || []).find((m: any) => m.id === medId && m.company_id === activeCompanyId);
     if (!targetMedia) throw new Error('Mídia não encontrada.');
-    const { duration, forceDuplicate } = body;
+    const { duration } = body;
     const itemDuration = Number(duration) || targetMedia.duration || 10;
     let updatedCount = 0;
     const nowStr = new Date().toISOString();
     dbData.playlists = (dbData.playlists || []).map((pl: any) => {
       if (pl.company_id !== activeCompanyId) return pl;
-      const alreadyHas = !forceDuplicate && (pl.items || []).some((it: any) => it.media_id === medId);
+      const existingItems = (pl.items || []).filter((it: any, idx: number, arr: any[]) =>
+        arr.findIndex((x) => (x.media_id ? x.media_id === it.media_id : x.id === it.id)) === idx
+      );
+      const alreadyHas = existingItems.some((it: any) => it.media_id === medId);
       if (alreadyHas) return pl;
       const newItems = [
-        ...(pl.items || []),
+        ...existingItems,
         {
           id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           playlist_id: pl.id,
           media_id: medId,
-          position: (pl.items?.length || 0) + 1,
+          position: existingItems.length + 1,
           duration: itemDuration,
           name: targetMedia.name,
           type: targetMedia.type,
           file_url: targetMedia.file_url,
           created_at: nowStr,
         },
-      ];
+      ].map((it: any, idx: number) => ({ ...it, position: idx + 1 }));
       updatedCount++;
       return { ...pl, items: newItems, updated_at: nowStr };
     });
@@ -1408,7 +1428,14 @@ export async function handleClientFallbackRequest(
     const nowStr = new Date().toISOString();
     const plId = `pl-${Date.now()}`;
     const rawItems = Array.isArray(body.items) ? body.items : [];
-    const normalizedItems = rawItems.map((it: any, index: number) => {
+    const seenPostIds = new Set<string>();
+    const dedupedRawItems = rawItems.filter((it: any, idx: number) => {
+      const k = it.media_id ? `media:${it.media_id}` : `item:${it.id || idx}`;
+      if (seenPostIds.has(k)) return false;
+      seenPostIds.add(k);
+      return true;
+    });
+    const normalizedItems = dedupedRawItems.map((it: any, index: number) => {
       const med = (dbData.media || []).find((m: any) => m.id === it.media_id);
       const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
       const bestUrl = isWeather ? 'widget:weather_clock' : (med?.r2_url || (med?.file_url?.startsWith('http') ? med.file_url : '') || it.file_url || med?.file_url || '');
@@ -1456,8 +1483,17 @@ export async function handleClientFallbackRequest(
     const plId = pathOnly.split('/')[3];
     const nowStr = new Date().toISOString();
     const hasItems = Array.isArray(body.items);
+    const seenPutIds = new Set<string>();
+    const dedupedPutItems = hasItems
+      ? body.items.filter((it: any, idx: number) => {
+          const k = it.media_id ? `media:${it.media_id}` : `item:${it.id || idx}`;
+          if (seenPutIds.has(k)) return false;
+          seenPutIds.add(k);
+          return true;
+        })
+      : [];
     const normalizedItems = hasItems
-      ? body.items.map((it: any, index: number) => {
+      ? dedupedPutItems.map((it: any, index: number) => {
           const med = (dbData.media || []).find((m: any) => m.id === it.media_id);
           const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
           const bestUrl = isWeather ? 'widget:weather_clock' : (med?.r2_url || (med?.file_url?.startsWith('http') ? med.file_url : '') || it.file_url || med?.file_url || '');
@@ -1814,6 +1850,13 @@ export async function handleClientFallbackRequest(
       'hora certa & previsão do tempo'
     );
 
+    const existingWeatherItem = (pl.items || []).find(
+      (it: any) => it.media_id === weatherMedia.id || it.type === 'weather_clock'
+    );
+    if (existingWeatherItem) {
+      return { message: 'Hora Certa & Previsão do Tempo já está na playlist.', playlist: pl, item: existingWeatherItem };
+    }
+
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       playlist_id: pl.id,
@@ -1869,6 +1912,11 @@ export async function handleClientFallbackRequest(
     }
 
     unmarkAsDeleted(dbData, rssMedia.id, rssMedia.name, rssMedia.file_url);
+
+    const existingRssItem = (pl.items || []).find((it: any) => it.media_id === rssMedia.id);
+    if (existingRssItem) {
+      return { message: 'Feed RSS já está na playlist.', playlist: pl, item: existingRssItem };
+    }
 
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -2402,23 +2450,27 @@ export async function handleClientFallbackRequest(
       const itemDuration = Number(duration) || newMedia.duration || 10;
       dbData.playlists = (dbData.playlists || []).map((pl: any) => {
         if (pl.company_id !== (companyId || activeCompanyId)) return pl;
+        const existingItems = (pl.items || []).filter((it: any, idx: number, arr: any[]) =>
+          arr.findIndex((x) => (x.media_id ? x.media_id === it.media_id : x.id === it.id)) === idx
+        );
+        if (existingItems.some((it: any) => it.media_id === newMedia.id)) return pl;
         return {
           ...pl,
           updated_at: nowStr,
           items: [
-            ...(pl.items || []),
+            ...existingItems,
             {
               id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               playlist_id: pl.id,
               media_id: newMedia.id,
-              position: (pl.items?.length || 0) + 1,
+              position: existingItems.length + 1,
               duration: itemDuration,
               name: newMedia.name,
               type: newMedia.type,
               file_url: newMedia.file_url,
               created_at: nowStr,
             },
-          ],
+          ].map((it: any, idx: number) => ({ ...it, position: idx + 1 })),
         };
       });
     }

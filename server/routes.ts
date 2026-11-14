@@ -1946,9 +1946,10 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: 
     if (media && media.active === false) return false;
     return true;
   });
+  const dedupedActiveItems = dedupePlaylistItems(activeItems);
   return {
     ...playlist,
-    items: activeItems.map((it) => {
+    items: dedupedActiveItems.map((it) => {
       let media = mediaList.find((m) => m.id === it.media_id);
       if (!media && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
         media = mediaList.find((m) => (m.company_id === playlist.company_id || !m.company_id) && m.type === 'weather_clock');
@@ -1967,6 +1968,18 @@ function enrichPlaylistWithMedia(playlist: Playlist, mediaList: Media[], data?: 
       };
     }),
   };
+}
+
+function dedupePlaylistItems<T extends Record<string, any>>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items || []) {
+    const key = item.media_id ? `media:${item.media_id}` : `item:${item.id || result.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...item, position: result.length + 1 });
+  }
+  return result;
 }
 
 apiRouter.get('/company/playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
@@ -2003,31 +2016,33 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'
   const now = new Date().toISOString();
   const playlistId = `pl-${Date.now()}`;
 
-  const formattedItems = (items || []).map((it: any, index: number) => {
-    const media = data.media.find((m) => m.id === it.media_id);
-    const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
-    return {
-      id: `pli-${Date.now()}-${index}`,
-      playlist_id: playlistId,
-      media_id: it.media_id,
-      position: index + 1,
-      duration: Math.max(1, Number(it.duration) || 10),
-      name: media?.name || it.name,
-      type: media?.type || it.type,
-      file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
-      // Sugestão 1: Agendamento Inteligente
-      schedule_enabled: Boolean(it.schedule_enabled),
-      schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
-      schedule_start_time: it.schedule_start_time || undefined,
-      schedule_end_time: it.schedule_end_time || undefined,
-      schedule_start_date: it.schedule_start_date || undefined,
-      schedule_end_date: it.schedule_end_date || undefined,
-      // Sugestão 4: Volume e Mudo por Mídia
-      volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
-      is_muted: Boolean(it.is_muted),
-      created_at: now,
-    };
-  });
+  const formattedItems: PlaylistItem[] = dedupePlaylistItems(
+    (items || []).map((it: any, index: number): PlaylistItem => {
+      const media = data.media.find((m) => m.id === it.media_id);
+      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
+      return {
+        id: `pli-${Date.now()}-${index}`,
+        playlist_id: playlistId,
+        media_id: it.media_id,
+        position: index + 1,
+        duration: Math.max(1, Number(it.duration) || 10),
+        name: media?.name || it.name,
+        type: media?.type || it.type,
+        file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
+        // Sugestão 1: Agendamento Inteligente
+        schedule_enabled: Boolean(it.schedule_enabled),
+        schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
+        schedule_start_time: it.schedule_start_time || undefined,
+        schedule_end_time: it.schedule_end_time || undefined,
+        schedule_start_date: it.schedule_start_date || undefined,
+        schedule_end_date: it.schedule_end_date || undefined,
+        // Sugestão 4: Volume e Mudo por Mídia
+        volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
+        is_muted: Boolean(it.is_muted),
+        created_at: now,
+      };
+    })
+  );
 
   const newPlaylist: Playlist = {
     id: playlistId,
@@ -2098,31 +2113,33 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'adm
 
   if (items && Array.isArray(items)) {
     const now = new Date().toISOString();
-    playlist.items = items.map((it: any, index: number) => {
-      const media = data.media.find((m) => m.id === it.media_id);
-      const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
-      return {
-        id: it.id || `pli-${Date.now()}-${index}`,
-        playlist_id: playlist.id,
-        media_id: it.media_id,
-        position: index + 1,
-        duration: Math.max(1, Number(it.duration) || 10),
-        name: media?.name || it.name,
-        type: media?.type || it.type,
-        file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
-        // Sugestão 1: Agendamento Inteligente
-        schedule_enabled: Boolean(it.schedule_enabled),
-        schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
-        schedule_start_time: it.schedule_start_time || undefined,
-        schedule_end_time: it.schedule_end_time || undefined,
-        schedule_start_date: it.schedule_start_date || undefined,
-        schedule_end_date: it.schedule_end_date || undefined,
-        // Sugestão 4: Volume e Mudo por Mídia
-        volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
-        is_muted: Boolean(it.is_muted),
-        created_at: it.created_at || now,
-      };
-    });
+    playlist.items = dedupePlaylistItems(
+      items.map((it: any, index: number) => {
+        const media = data.media.find((m) => m.id === it.media_id);
+        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || media?.type === 'weather_clock';
+        return {
+          id: it.id || `pli-${Date.now()}-${index}`,
+          playlist_id: playlist.id,
+          media_id: it.media_id,
+          position: index + 1,
+          duration: Math.max(1, Number(it.duration) || 10),
+          name: media?.name || it.name,
+          type: media?.type || it.type,
+          file_url: resolveBestMediaFileUrl(media, it.file_url, isWeather),
+          // Sugestão 1: Agendamento Inteligente
+          schedule_enabled: Boolean(it.schedule_enabled),
+          schedule_days: Array.isArray(it.schedule_days) ? it.schedule_days : undefined,
+          schedule_start_time: it.schedule_start_time || undefined,
+          schedule_end_time: it.schedule_end_time || undefined,
+          schedule_start_date: it.schedule_start_date || undefined,
+          schedule_end_date: it.schedule_end_date || undefined,
+          // Sugestão 4: Volume e Mudo por Mídia
+          volume: it.volume !== undefined ? Math.max(0, Math.min(100, Number(it.volume))) : 100,
+          is_muted: Boolean(it.is_muted),
+          created_at: it.created_at || now,
+        };
+      })
+    );
   }
   playlist.updated_at = new Date().toISOString();
 
@@ -2257,17 +2274,29 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
     'hora certa & previsão do tempo'
   );
 
+  playlist.items = dedupePlaylistItems(playlist.items || []);
+  const existingWeatherItem = playlist.items.find(
+    (it) => it.media_id === weatherMedia!.id || it.type === 'weather_clock'
+  );
+  if (existingWeatherItem) {
+    return res.json({
+      message: 'Hora Certa & Previsão do Tempo já está incluída nesta playlist.',
+      playlist,
+      item: existingWeatherItem,
+    });
+  }
+
   const newItem: PlaylistItem = {
     id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     playlist_id: playlist.id,
     media_id: weatherMedia.id,
-    position: (playlist.items?.length || 0) + 1,
+    position: playlist.items.length + 1,
     duration: duration || weatherMedia.duration || 12,
     created_at: now,
   };
 
-  playlist.items = playlist.items || [];
   playlist.items.push(newItem);
+  playlist.items = dedupePlaylistItems(playlist.items);
   playlist.updated_at = now;
   db.persist();
   saveDatabaseToFirestoreNow(data).catch(() => {});
@@ -2335,17 +2364,27 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
   // Ensure RSS media and URL are never blocked by tombstones
   unmarkAsDeleted(data, rssMedia.id, rssMedia.name, rssMedia.file_url);
 
+  playlist.items = dedupePlaylistItems(playlist.items || []);
+  const existingRssItem = playlist.items.find((it) => it.media_id === rssMedia!.id);
+  if (existingRssItem) {
+    return res.json({
+      message: `Notícias RSS "${rssMedia.name}" já estão incluídas na playlist "${playlist.name}".`,
+      playlist,
+      item: existingRssItem,
+    });
+  }
+
   const newItem: PlaylistItem = {
     id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     playlist_id: playlist.id,
     media_id: rssMedia.id,
-    position: (playlist.items?.length || 0) + 1,
+    position: playlist.items.length + 1,
     duration: duration || rssMedia.duration || 15,
     created_at: now,
   };
 
-  playlist.items = playlist.items || [];
   playlist.items.push(newItem);
+  playlist.items = dedupePlaylistItems(playlist.items);
   playlist.updated_at = now;
   db.persist();
   saveDatabaseToFirestoreNow(data).catch(() => {});
@@ -2749,6 +2788,10 @@ apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (
     const itemDuration = Number(duration) || newMedia.duration || 10;
     const companyPlaylists = data.playlists.filter((p) => p.company_id === companyId);
     companyPlaylists.forEach((pl) => {
+      pl.items = dedupePlaylistItems(pl.items || []);
+      if (pl.items.some((it) => it.media_id === newMedia.id)) {
+        return;
+      }
       pl.items.push({
         id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         playlist_id: pl.id,
@@ -2760,6 +2803,7 @@ apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (
         file_url: newMedia.file_url,
         created_at: now,
       });
+      pl.items = dedupePlaylistItems(pl.items);
       pl.updated_at = now;
       playlistsUpdatedCount++;
     });
@@ -3066,8 +3110,9 @@ apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRo
   let alreadyContainedCount = 0;
 
   companyPlaylists.forEach((pl) => {
+    pl.items = dedupePlaylistItems(pl.items || []);
     const alreadyExists = pl.items.some((it) => it.media_id === media.id);
-    if (!alreadyExists || forceDuplicate) {
+    if (!alreadyExists) {
       pl.items.push({
         id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         playlist_id: pl.id,
@@ -3079,6 +3124,7 @@ apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRo
         file_url: media.file_url,
         created_at: now,
       });
+      pl.items = dedupePlaylistItems(pl.items);
       pl.updated_at = now;
       updatedPlaylistsCount++;
     } else {
@@ -6480,6 +6526,10 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       const itemDuration = Number(duration) || newMedia.duration || (isVideo ? 15 : 10);
       const companyPlaylists = data.playlists.filter((p) => p.company_id === companyId);
       companyPlaylists.forEach((pl) => {
+        pl.items = dedupePlaylistItems(pl.items || []);
+        if (pl.items.some((it) => it.media_id === newMedia.id)) {
+          return;
+        }
         pl.items.push({
           id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           playlist_id: pl.id,
@@ -6491,6 +6541,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
           file_url: newMedia.file_url,
           created_at: now,
         });
+        pl.items = dedupePlaylistItems(pl.items);
         pl.updated_at = now;
         playlistsUpdatedCount++;
       });
