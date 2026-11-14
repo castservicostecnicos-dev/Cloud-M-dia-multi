@@ -333,7 +333,7 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
         )}
 
         {/* Video Duration */}
-        {(showDuration || videoDuration || media.duration) && (
+        {showDuration && (videoDuration || media.duration) && (
           <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1 rounded bg-black/80 px-1.5 py-0.5 text-[10px] font-mono text-slate-300 border border-slate-700 backdrop-blur-xs">
             <Clock className="h-3 w-3 text-slate-400" />
             <span>{media.duration || videoDuration || 10}s</span>

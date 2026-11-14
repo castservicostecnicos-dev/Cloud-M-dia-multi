@@ -2855,7 +2855,6 @@ apiRouter.put('/company/media/:id', requireAuth, requireRole('company', 'admin')
           if (name !== undefined) it.name = media.name;
           if (type !== undefined) it.type = media.type;
           if (file_url !== undefined) it.file_url = resolveBestMediaFileUrl(media, it.file_url);
-          if (duration !== undefined) it.duration = media.duration;
           touched = true;
         }
       }

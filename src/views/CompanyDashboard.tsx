@@ -555,7 +555,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [choosePlaylistsModalMedia, setChoosePlaylistsModalMedia] = useState<Media | null>(null);
   const [selectedPlaylistIdsForMedia, setSelectedPlaylistIdsForMedia] = useState<string[]>([]);
   const [isAddingToPlaylists, setIsAddingToPlaylists] = useState(false);
-  const [choosePlaylistsDuration, setChoosePlaylistsDuration] = useState<number>(10);
   const [choosePlaylistsRestart, setChoosePlaylistsRestart] = useState<boolean>(true);
   const [choosePlaylistsDuplicate, setChoosePlaylistsDuplicate] = useState<boolean>(false);
 
@@ -566,7 +565,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
   const openChoosePlaylistsModal = (media: Media) => {
     setChoosePlaylistsModalMedia(media);
-    setChoosePlaylistsDuration(Number(media.duration) || 10);
     setChoosePlaylistsRestart(true);
     setChoosePlaylistsDuplicate(false);
     // Pre-selecionar playlists que já possuem esta mídia
@@ -613,7 +611,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               playlist_id: pl.id,
               media_id: media.id,
               position: (pl.items?.length || 0) + 1,
-              duration: Number(choosePlaylistsDuration) || Number(media.duration) || 10,
+              duration: media.type === 'weather_clock' ? 12 : media.type === 'rss' ? 15 : 10,
               name: media.name,
               type: media.type,
               file_url: media.file_url,
@@ -3740,7 +3738,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             key={it.id || idx}
                             onClick={() => {
                               if (matchedMedia) {
-                                setPreviewModalMedia(matchedMedia);
+                                setPreviewModalMedia({ ...matchedMedia, duration: Number(it.duration) || matchedMedia.duration });
                               } else if (isWeather) {
                                 setPreviewModalMedia({
                                   id: 'med-weather-preview',
@@ -4144,13 +4142,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                   )}
 
                   <div className="mt-2.5 pt-2 border-t border-slate-700/60 space-y-2">
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="flex items-center gap-1 font-medium">
-                        <Clock className="h-3.5 w-3.5 text-slate-400" />
-                        {m.duration}s
-                      </span>
-
-                      {(m.drive_view_url || m.drive_file_id) && (
+                    {(m.drive_view_url || m.drive_file_id) && (
+                      <div className="flex items-center justify-end text-xs text-slate-400">
                         <a
                           href={m.drive_view_url || m.file_url}
                           target="_blank"
@@ -4161,8 +4154,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                           <ExternalLink className="h-3 w-3 text-blue-400 shrink-0" />
                           <span>Abrir Mídia</span>
                         </a>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
                     {/* Botões de Ação Responsivos (com opção de escolher playlists) */}
                     <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-1.5 w-full">
@@ -5459,7 +5452,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         const itemType = media?.type || (it as any).type || (isWeather ? 'weather_clock' : 'image');
                         return (
                           <div
-                            key={idx}
+                            key={it.id || `${it.media_id}-${idx}`}
                             className="flex items-center gap-2 sm:gap-2.5 rounded-xl border border-slate-700/80 bg-slate-800/80 hover:bg-slate-800 p-2 sm:p-2.5 transition"
                           >
                             <span className="font-mono text-slate-400 font-bold text-xs w-5 sm:w-6 text-center shrink-0">#{idx + 1}</span>
@@ -5468,7 +5461,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             <div
                               onClick={() => {
                                 if (media) {
-                                  setPreviewModalMedia(media);
+                                  setPreviewModalMedia({ ...media, duration: Number(it.duration) || media.duration });
                                 } else if (isWeather) {
                                   setPreviewModalMedia({
                                     id: 'med-weather-preview',
@@ -5592,7 +5585,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                                 onChange={(e) => {
                                   const v = e.target.value;
                                   const newItems = [...playlistForm.items];
-                                  newItems[idx].duration = v === '' ? '' : Number(v);
+                                  newItems[idx] = { ...newItems[idx], duration: v === '' ? '' : Number(v) };
                                   setPlaylistForm({ ...playlistForm, items: newItems });
                                 }}
                                 placeholder="10"
@@ -6355,7 +6348,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     <p className="font-bold text-white">Upload Direto com Nomes Originais</p>
                     <p className="text-blue-200/90 leading-relaxed text-[11px]">
                       Os arquivos são salvos diretamente na sua biblioteca com seus respectivos nomes originais.
-                      Após salvar, você poderá clicar no botão <strong className="text-amber-300">"Escolher Playlists"</strong> no card de cada mídia para definir as telas e o tempo de duração.
+                      Após salvar, você poderá clicar no botão <strong className="text-amber-300">"Escolher Playlists"</strong> no card de cada mídia para definir em quais playlists ela será exibida (o tempo de duração é definido em cada playlist).
                     </p>
                   </div>
                 </div>
@@ -7381,28 +7374,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         ? 'Vídeo'
                         : 'Imagem'}
                     </span>
-                    <span>Duração atual: <strong>{choosePlaylistsModalMedia.duration}s</strong></span>
                   </div>
                 </div>
               </div>
 
-              {/* Parâmetros: Duração e Opções */}
+              {/* Opções */}
               <div className="space-y-3 bg-slate-800/60 rounded-xl p-3.5 border border-slate-700/60">
-                <div>
-                  <label className="block font-semibold text-slate-300 mb-1">
-                    Tempo de exibição nesta inserção (segundos):
-                  </label>
-                  <input
-                    type="number"
-                    min={2}
-                    max={600}
-                    value={choosePlaylistsDuration}
-                    onChange={(e) => setChoosePlaylistsDuration(Math.max(1, Number(e.target.value) || 10))}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs font-semibold"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2 pt-1">
+                <div className="flex items-center gap-2">
                   <input
                     type="checkbox"
                     id="chk-duplicate-all-pl"
