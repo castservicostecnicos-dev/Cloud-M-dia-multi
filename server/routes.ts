@@ -1900,7 +1900,7 @@ function computePlayerSyncVersion(data: any, player?: Player, playlist?: Playlis
         it.id,
         it.media_id,
         it.position,
-        Number(it.duration) || m?.duration || 10,
+        Number(it.duration) || (isWeather ? 12 : m?.type === 'rss' ? 15 : 10),
         m?.updated_at || '',
         resolveBestMediaFileUrl(m, it.file_url, isWeather),
         Boolean(it.schedule_enabled),
@@ -3117,7 +3117,7 @@ apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRo
     return res.status(400).json({ error: 'Nenhuma playlist cadastrada para esta empresa. Crie uma playlist primeiro.' });
   }
 
-  const itemDuration = Number(duration) || media.duration || 10;
+  const itemDuration = Number(duration) || (media.type === 'weather_clock' ? 12 : media.type === 'rss' ? 15 : 10);
   const now = new Date().toISOString();
   let updatedPlaylistsCount = 0;
   let alreadyContainedCount = 0;
@@ -4173,7 +4173,7 @@ apiRouter.get('/player/current', async (req: AuthenticatedRequest, res) => {
             id: it.id,
             media_id: it.media_id,
             position: it.position,
-            duration: Number(it.duration) || m?.duration || (mediaType === 'video' ? 15 : 10),
+            duration: Math.max(1, Number(it.duration) || (isWeather ? 12 : mediaType === 'rss' ? 15 : 10)),
             name: mediaName,
             type: mediaType,
             file_url: mediaFileUrl,

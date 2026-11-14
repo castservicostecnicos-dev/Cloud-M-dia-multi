@@ -1260,7 +1260,7 @@ export async function handleClientFallbackRequest(
     const targetMedia = (dbData.media || []).find((m: any) => m.id === medId && m.company_id === activeCompanyId);
     if (!targetMedia) throw new Error('Mídia não encontrada.');
     const { duration } = body;
-    const itemDuration = Number(duration) || targetMedia.duration || 10;
+    const itemDuration = Number(duration) || (targetMedia.type === 'weather_clock' ? 12 : targetMedia.type === 'rss' ? 15 : 10);
     let updatedCount = 0;
     const nowStr = new Date().toISOString();
     dbData.playlists = (dbData.playlists || []).map((pl: any) => {
@@ -2715,7 +2715,7 @@ export async function handleClientFallbackRequest(
           id: it.id || `item-${idx}`,
           media_id: med?.id || it.media_id,
           position: it.position || idx + 1,
-          duration: Number(it.duration) || med?.duration || 10,
+          duration: Math.max(1, Number(it.duration) || (isWeather ? 12 : (med?.type || it.type) === 'rss' ? 15 : 10)),
           name: med?.name || it.name || (isWeather ? 'Hora Certa & Previsão do Tempo' : 'Mídia'),
           type: med?.type || (isWeather ? 'weather_clock' : it.type) || 'image',
           file_url: bestUrl,
@@ -2932,9 +2932,12 @@ export async function handleClientFallbackRequest(
         Date.now() - Number(c.timestamp || 0) < (Number(c.duration || 10) + 5) * 1000
     );
 
-    const activePlaylist = resolvedPlayer?.playlist_id
-      ? (dbData.playlists || []).find((pl: any) => pl.id === resolvedPlayer.playlist_id && pl.active !== false)
-      : null;
+    const compPlaylists = (dbData.playlists || []).filter((pl: any) => pl.company_id === resolvedPlayer?.company_id);
+    const activePlaylist =
+      compPlaylists.find((pl: any) => pl.id === resolvedPlayer?.playlist_id && pl.active !== false) ||
+      compPlaylists.find((pl: any) => pl.active !== false) ||
+      compPlaylists[0] ||
+      null;
 
     const pendingRestart = (dbData.pending_restarts || []).find(
       (r: any) =>
@@ -2942,6 +2945,36 @@ export async function handleClientFallbackRequest(
         (!r.playlistId || !activePlaylist || r.playlistId === activePlaylist.id) &&
         Date.now() - Number(r.timestamp || 0) < 60000
     );
+
+    const compMedia = (dbData.media || []).filter((m: any) => m.company_id === resolvedPlayer?.company_id);
+    const normalizedPlaylistItems = (activePlaylist?.items || [])
+      .map((it: any, idx: number) => {
+        let med = compMedia.find((m: any) => m.id === it.media_id);
+        if (!med && (it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock')) {
+          med = compMedia.find((m: any) => m.type === 'weather_clock');
+        }
+        const isWeather = it.media_id?.includes('weather') || it.type === 'weather_clock' || it.file_url === 'widget:weather_clock' || med?.type === 'weather_clock';
+        if (!med && !isWeather) return null;
+        if (med && med.active === false) return null;
+        const r2Url = med?.r2_url || it.r2_url;
+        const bestUrl = isWeather
+          ? 'widget:weather_clock'
+          : (r2Url && String(r2Url).startsWith('http'))
+          ? r2Url
+          : (med?.file_url && (med.file_url.startsWith('http') || med.file_url.startsWith('/uploads/') || med.file_url.startsWith('data:')))
+          ? med.file_url
+          : (it.file_url && (it.file_url.startsWith('http') || it.file_url.startsWith('/uploads/') || it.file_url.startsWith('data:')))
+          ? it.file_url
+          : (med?.file_url || it.file_url || '');
+        return {
+          id: it.id || `item-${idx}`,
+          media_id: med?.id || it.media_id,
+          position: it.position || idx + 1,
+          duration: Math.max(1, Number(it.duration) || (isWeather ? 12 : (med?.type || it.type) === 'rss' ? 15 : 10)),
+          file_url: bestUrl,
+        };
+      })
+      .filter(Boolean);
 
     const syncVersion = resolvedPlayer
       ? [
@@ -2954,7 +2987,7 @@ export async function handleClientFallbackRequest(
           Boolean(resolvedPlayer.is_sleeping),
           activePlaylist?.id || '',
           activePlaylist?.updated_at || '',
-          (activePlaylist?.items || []).map((x: any) => `${x.id}:${x.media_id}:${x.position}:${x.duration}:${x.file_url}`).join(';'),
+          normalizedPlaylistItems.map((x: any) => `${x.id}:${x.media_id}:${x.position}:${x.duration}:${x.file_url}`).join(';'),
         ].join('|')
       : undefined;
 

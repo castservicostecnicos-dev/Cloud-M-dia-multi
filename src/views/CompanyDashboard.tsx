@@ -461,6 +461,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
   // Modal para configuração de Agendamento Inteligente do item da playlist
   const [scheduleModalItemIndex, setScheduleModalItemIndex] = useState<number | null>(null);
+  const [playlistBatchDuration, setPlaylistBatchDuration] = useState<number | string>(10);
 
   // Estados da Prova de Exibição (Proof of Play)
   const [proofOfPlaySummary, setProofOfPlaySummary] = useState<ProofOfPlaySummary | null>(null);
@@ -1462,7 +1463,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         custom_ticker_speed: 2,
         items: mediaList.slice(0, 2).map((m) => ({
           media_id: m.id,
-          duration: m.duration || 10,
+          duration: m.type === 'weather_clock' ? 12 : m.type === 'rss' ? 15 : 10,
           name: m.name,
           type: m.type,
           schedule_enabled: false,
@@ -1618,7 +1619,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setMediaPickerModalOpen(false);
       return;
     }
-    const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
+    const itemDuration = media.type === 'weather_clock' ? 12 : media.type === 'rss' ? 15 : 10;
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       media_id: media.id,
@@ -1636,12 +1637,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         items: dedupeItemsByMediaId([...prev.items, newItem]),
       };
     });
-    showToast('success', `Mídia "${media.name}" adicionada à playlist. Lembre-se de salvar a playlist para confirmar.`);
+    showToast('success', `Mídia "${media.name}" adicionada à playlist. Defina o tempo de exibição na lista e salve a playlist.`);
     setMediaPickerModalOpen(false);
   };
 
   const handleSelectMediaForPlaylistAndRestart = async (media: Media) => {
-    const itemDuration = media.duration || (media.type === 'rss' ? 15 : 10);
+    const itemDuration = media.type === 'weather_clock' ? 12 : media.type === 'rss' ? 15 : 10;
     const alreadyExists = playlistForm.items.some((it) => it.media_id === media.id);
     const newItem = {
       id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -1921,25 +1922,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         sizeFormatted: formatFileSize(file.size),
         type: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
         isVideo,
-        duration: isVideo ? 15 : 10,
+        duration: 10,
       });
-
-      // Detectar duração real do vídeo automaticamente
-      if (isVideo) {
-        try {
-          const tempVideo = document.createElement('video');
-          tempVideo.preload = 'metadata';
-          tempVideo.onloadedmetadata = () => {
-            const realSec = Math.round(tempVideo.duration);
-            if (!isNaN(realSec) && realSec > 0) {
-              setSelectedDeviceFiles((prev) =>
-                prev.map((q) => (q.id === itemId ? { ...q, duration: realSec } : q))
-              );
-            }
-          };
-          tempVideo.src = previewUrl;
-        } catch {}
-      }
     }
 
     if (newItems.length > 0) {
@@ -2113,7 +2097,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
           if (currentPlItems.some((it) => it.media_id === created.id)) {
             continue;
           }
-          const itemDuration = Number(created.duration) || (created.type === 'rss' ? 15 : 10);
+          const itemDuration = created.type === 'weather_clock' ? 12 : created.type === 'rss' ? 15 : 10;
           const newItem: PlaylistItem = {
             id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
             playlist_id: pl.id,
@@ -2139,7 +2123,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               .map((cm) => ({
                 id: `pli-${Date.now()}-${cm.id}`,
                 media_id: cm.id,
-                duration: Number(cm.duration) || 10,
+                duration: cm.type === 'weather_clock' ? 12 : cm.type === 'rss' ? 15 : 10,
                 name: cm.name,
                 type: cm.type,
                 file_url: cm.file_url,
@@ -5425,7 +5409,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <div className="border-t border-slate-800 pt-3">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
                     <div>
-                      <label className="font-semibold text-slate-300 block">Sequência</label>
+                      <label className="font-semibold text-slate-300 block">Sequência e Tempo de Exibição</label>
+                      <p className="text-[11px] text-slate-400">
+                        Defina o tempo em segundos de cada mídia nesta playlist — o player aplicará na reprodução.
+                      </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
@@ -5478,6 +5465,43 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {playlistForm.items.length > 1 && (
+                    <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs">
+                      <span className="text-slate-400 font-medium flex items-center gap-1.5">
+                        <Clock className="h-3.5 w-3.5 text-blue-400" />
+                        <span>Definir mesmo tempo para todas as mídias:</span>
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min={1}
+                          max={600}
+                          value={playlistBatchDuration}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setPlaylistBatchDuration(v === '' ? '' : Number(v));
+                          }}
+                          className="w-16 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-center text-xs font-bold text-white focus:border-blue-500 focus:outline-none"
+                        />
+                        <span className="text-slate-400 text-[11px]">seg</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const sec = Math.max(1, Math.min(600, Number(playlistBatchDuration) || 10));
+                            setPlaylistBatchDuration(sec);
+                            setPlaylistForm((prev) => ({
+                              ...prev,
+                              items: prev.items.map((item) => ({ ...item, duration: sec })),
+                            }));
+                          }}
+                          className="px-2.5 py-1 rounded-md bg-blue-600/80 hover:bg-blue-500 text-white font-bold text-[11px] transition cursor-pointer"
+                        >
+                          Aplicar a todas
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                     {playlistForm.items.length === 0 ? (
@@ -5652,8 +5676,12 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             </div>
 
                             {/* Duration input */}
-                            <div className="flex items-center gap-1 bg-slate-900 px-2 py-1 rounded-lg border border-slate-700 shrink-0">
-                              <Clock className="h-3 w-3 text-slate-400" />
+                            <div
+                              className="flex items-center gap-1 bg-slate-900 px-2 py-1 rounded-lg border border-blue-500/40 shrink-0"
+                              title="Tempo de exibição desta mídia nesta playlist (em segundos)"
+                            >
+                              <Clock className="h-3 w-3 text-blue-400 shrink-0" />
+                              <span className="hidden sm:inline text-[10px] font-semibold text-slate-400">Tempo:</span>
                               <input
                                 type="number"
                                 min={1}
@@ -5665,8 +5693,15 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                                   newItems[idx] = { ...newItems[idx], duration: v === '' ? '' : Number(v) };
                                   setPlaylistForm({ ...playlistForm, items: newItems });
                                 }}
+                                onBlur={(e) => {
+                                  const normalized = Math.max(1, Math.min(600, Number(e.target.value) || 10));
+                                  const newItems = [...playlistForm.items];
+                                  newItems[idx] = { ...newItems[idx], duration: normalized };
+                                  setPlaylistForm({ ...playlistForm, items: newItems });
+                                }}
                                 placeholder="10"
-                                className="w-10 sm:w-12 bg-transparent text-white text-xs font-bold text-center focus:outline-none"
+                                aria-label={`Tempo de exibição de ${itemName} em segundos`}
+                                className="w-11 sm:w-12 bg-transparent text-white text-xs font-bold text-center focus:outline-none"
                               />
                               <span className="text-slate-400 text-[10px] font-semibold">s</span>
                             </div>
@@ -5933,7 +5968,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                           <MediaThumbnail
                             media={m}
                             showBadge={true}
-                            showDuration={true}
+                            showDuration={false}
                             showPreviewButton={true}
                             allowHoverPlay={true}
                             onPreview={(item) => setPreviewModalMedia(item)}
@@ -6362,12 +6397,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                             src={mediaForm.file_url}
                             controls
                             className="w-full max-h-44 object-contain"
-                            onLoadedMetadata={(e) => {
-                              const d = Math.round((e.target as HTMLVideoElement).duration);
-                              if (!isNaN(d) && d > 0 && (!mediaForm.duration || mediaForm.duration === 10)) {
-                                setMediaForm((prev) => ({ ...prev, duration: d }));
-                              }
-                            }}
                           />
                         ) : (
                           <img
@@ -6472,8 +6501,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     />
                   </div>
 
-                  {/* TIPO E TEMPO */}
-                  <div className="grid grid-cols-2 gap-3">
+                  {/* TIPO DE MÍDIA */}
+                  <div className="space-y-2">
                     <div>
                       <label className="block font-semibold text-slate-300 mb-1">Tipo de Mídia *</label>
                       <select
@@ -6489,7 +6518,6 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                                 : mediaForm.file_url === 'widget:weather_clock'
                                 ? ''
                                 : mediaForm.file_url,
-                            duration: newType === 'weather_clock' ? 12 : newType === 'rss' ? 15 : mediaForm.duration,
                           });
                           if (newType === 'weather_clock') setMediaSourceType('weather_clock');
                           if (newType === 'rss') setMediaSourceType('rss');
@@ -6502,23 +6530,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                         <option value="weather_clock">Clima & Hora Certa</option>
                       </select>
                     </div>
-
-                    <div>
-                      <label className="block font-semibold text-slate-300 mb-1">Tempo na Tela (seg) *</label>
-                      <input
-                        type="number"
-                        min={2}
-                        max={600}
-                        required
-                        value={mediaForm.duration}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setMediaForm({ ...mediaForm, duration: v === '' ? '' : Number(v) });
-                        }}
-                        placeholder="Ex: 15"
-                        className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      O tempo de exibição na tela é configurado individualmente dentro de cada playlist.
+                    </p>
                   </div>
 
                   {/* Exemplos Rápidos para Teste */}

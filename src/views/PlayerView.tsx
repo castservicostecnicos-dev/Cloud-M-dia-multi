@@ -1011,11 +1011,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
     }, remainingMs);
 
     return () => clearTimeout(timer);
-  }, [effectiveItems, currentIndex, playCycle, activeCall, data?.player?.is_sleeping]);
-
-  const handleVideoEnded = () => {
-    advanceNextMedia();
-  };
+  }, [effectiveItems, currentIndex, playCycle, currentMedia?.duration, activeCall, data?.player?.is_sleeping]);
 
   // Sugestão 3: Transições Visuais Suaves e Cinematográficas
   const transitionEffect = data?.player?.transition_effect || data?.playlist?.transition_effect || 'crossfade';
@@ -1205,12 +1201,17 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
                 key={`${currentMedia.id}-${currentIndex}-${playCycle}`}
                 src={resolveVideoPlaybackUrl(currentMedia)}
                 autoPlay
+                loop
                 playsInline
                 preload="auto"
                 muted={Boolean(data.player.master_muted || currentMedia.is_muted || autoplayMuted)}
                 onLoadedData={(e) => attemptVideoPlayback(e.currentTarget)}
                 onCanPlay={(e) => attemptVideoPlayback(e.currentTarget)}
-                onEnded={handleVideoEnded}
+                onEnded={(e) => {
+                  const v = e.currentTarget;
+                  v.currentTime = 0;
+                  v.play().catch(() => {});
+                }}
                 onError={(e) => {
                   const target = e.currentTarget;
                   const streamUrl = `${API_BASE_URL}/media/stream/${currentMedia.media_id || currentMedia.id}?proxy=1`;
