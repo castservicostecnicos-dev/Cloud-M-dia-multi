@@ -631,6 +631,7 @@ export interface DatabaseSchema {
   proof_of_play_logs?: ProofOfPlayLog[];
   sessions?: AuthSession[];
   deleted_media_ids?: string[];
+  deleted_playlist_ids?: string[];
   seeded_companies?: string[];
 }
 
@@ -1065,8 +1066,17 @@ class DatabaseStore {
           }));
         };
 
-        const filteredCloudPlaylists = cleanPlaylistItems(cloudData.playlists);
-        const filteredLocalPlaylists = cleanPlaylistItems(localData.playlists);
+        const combinedDeletedPlaylistIds = Array.from(
+          new Set([...(cloudData.deleted_playlist_ids || []), ...(localData.deleted_playlist_ids || [])])
+        ).filter(Boolean);
+        const deletedPlaylistSet = new Set(combinedDeletedPlaylistIds);
+
+        const filteredCloudPlaylists = cleanPlaylistItems(
+          (cloudData.playlists || []).filter((pl) => pl && !deletedPlaylistSet.has(pl.id))
+        );
+        const filteredLocalPlaylists = cleanPlaylistItems(
+          (localData.playlists || []).filter((pl) => pl && !deletedPlaylistSet.has(pl.id))
+        );
 
         const combinedSeededCompanies = Array.from(
           new Set([...(cloudData.seeded_companies || []), ...(localData.seeded_companies || [])])
@@ -1100,6 +1110,7 @@ class DatabaseStore {
           proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs, localData.proof_of_play_logs).slice(-5000),
           sessions: Array.from(sessionMap.values()).slice(-200),
           deleted_media_ids: combinedDeletedIds,
+          deleted_playlist_ids: combinedDeletedPlaylistIds,
           seeded_companies: combinedSeededCompanies,
         };
 
@@ -1200,6 +1211,18 @@ class DatabaseStore {
           if (s && s.token) sessionMap.set(s.token, s);
         }
 
+        const combinedDeletedPlaylistIds = Array.from(
+          new Set([...(cloudData.deleted_playlist_ids || []), ...(localData.deleted_playlist_ids || [])])
+        ).filter(Boolean);
+        const deletedPlaylistSet = new Set(combinedDeletedPlaylistIds);
+
+        const filteredCloudPlaylists = cleanPlaylistItems(
+          (cloudData.playlists || []).filter((pl) => pl && !deletedPlaylistSet.has(pl.id))
+        );
+        const filteredLocalPlaylists = cleanPlaylistItems(
+          (localData.playlists || []).filter((pl) => pl && !deletedPlaylistSet.has(pl.id))
+        );
+
         this.data = {
           ...this.data,
           users: this.mergeById(cloudData.users, localData.users),
@@ -1208,7 +1231,7 @@ class DatabaseStore {
           plans: this.mergeById(cloudData.plans, localData.plans),
           players: this.mergeById(cloudData.players, localData.players),
           operators: this.mergeById(cloudData.operators, localData.operators),
-          playlists: this.mergeById(cleanPlaylistItems(cloudData.playlists), cleanPlaylistItems(localData.playlists)).map((pl) => ({
+          playlists: this.mergeById(filteredCloudPlaylists, filteredLocalPlaylists).map((pl) => ({
             ...pl,
             active: pl.active !== false,
           })),
@@ -1220,6 +1243,7 @@ class DatabaseStore {
           sessions: Array.from(sessionMap.values()).slice(-200),
           proof_of_play_logs: this.mergeById(cloudData.proof_of_play_logs || [], localData.proof_of_play_logs || []).slice(-5000),
           deleted_media_ids: combinedDeletedIds,
+          deleted_playlist_ids: combinedDeletedPlaylistIds,
         };
 
         try {

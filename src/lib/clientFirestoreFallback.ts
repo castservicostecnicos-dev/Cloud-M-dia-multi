@@ -217,22 +217,27 @@ function normalizeDbShape(parsed: any) {
     normalized.media = normalized.media.filter((m: any) => !isDeleted(m));
   }
   if (Array.isArray(normalized.playlists)) {
-    normalized.playlists = normalized.playlists.map((pl: any) => {
-      const seenIds = new Set<string>();
-      const cleanItems = (pl.items || [])
-        .filter((it: any) => !isDeleted(it))
-        .filter((it: any, idx: number) => {
-          const k = it.media_id ? `media:${it.media_id}` : `item:${it.id || idx}`;
-          if (seenIds.has(k)) return false;
-          seenIds.add(k);
-          return true;
-        })
-        .map((it: any, idx: number) => ({ ...it, position: idx + 1 }));
-      return {
-        ...pl,
-        items: cleanItems,
-      };
-    });
+    const deletedPlSet = new Set<string>(
+      Array.isArray(normalized.deleted_playlist_ids) ? normalized.deleted_playlist_ids : []
+    );
+    normalized.playlists = normalized.playlists
+      .filter((pl: any) => pl && !deletedPlSet.has(pl.id))
+      .map((pl: any) => {
+        const seenIds = new Set<string>();
+        const cleanItems = (pl.items || [])
+          .filter((it: any) => !isDeleted(it))
+          .filter((it: any, idx: number) => {
+            const k = it.media_id ? `media:${it.media_id}` : `item:${it.id || idx}`;
+            if (seenIds.has(k)) return false;
+            seenIds.add(k);
+            return true;
+          })
+          .map((it: any, idx: number) => ({ ...it, position: idx + 1 }));
+        return {
+          ...pl,
+          items: cleanItems,
+        };
+      });
   }
   if (Array.isArray(normalized.rss_feeds)) {
     normalized.rss_feeds = normalized.rss_feeds.filter((r: any) => !isDeleted(r));
@@ -1291,6 +1296,37 @@ export async function handleClientFallbackRequest(
     };
   }
 
+  if (pathOnly.startsWith('/company/media/') && method === 'PUT') {
+    const medId = pathOnly.split('/')[3];
+    const nowStr = new Date().toISOString();
+    let updatedMedia: any = null;
+    dbData.media = (dbData.media || []).map((m: any) => {
+      if (m.id === medId) {
+        updatedMedia = { ...m, ...body, updated_at: nowStr };
+        return updatedMedia;
+      }
+      return m;
+    });
+    if (!updatedMedia) throw new Error('Mídia não encontrada.');
+    if (Array.isArray(dbData.playlists)) {
+      dbData.playlists = dbData.playlists.map((pl: any) => ({
+        ...pl,
+        items: (pl.items || []).map((it: any) =>
+          it.media_id === medId
+            ? {
+                ...it,
+                name: updatedMedia.name || it.name,
+                type: updatedMedia.type || it.type,
+                file_url: updatedMedia.file_url || it.file_url,
+              }
+            : it
+        ),
+      }));
+    }
+    await saveCloudDb(dbData);
+    return updatedMedia;
+  }
+
   if (pathOnly.startsWith('/company/media/') && method === 'DELETE') {
     const medId = pathOnly.split('/')[3];
     const targetMedia = (dbData.media || []).find((m: any) => m.id === medId);
@@ -1731,6 +1767,45 @@ export async function handleClientFallbackRequest(
     return { message: `Playlist ${pl.active ? 'ativada' : 'desativada'} com sucesso.`, active: pl.active };
   }
 
+  if (pathOnly.startsWith('/company/playlists/') && method === 'DELETE') {
+    const plId = pathOnly.split('/')[3];
+    const nowStr = new Date().toISOString();
+    dbData.deleted_playlist_ids = dbData.deleted_playlist_ids || [];
+    if (!dbData.deleted_playlist_ids.includes(plId)) {
+      dbData.deleted_playlist_ids.push(plId);
+    }
+    dbData.playlists = (dbData.playlists || []).filter((p: any) => p.id !== plId);
+    dbData.players = (dbData.players || []).map((player: any) =>
+      player.playlist_id === plId
+        ? { ...player, playlist_id: null, updated_at: nowStr }
+        : player
+    );
+    const ts = Date.now();
+    dbData.pending_restarts = [
+      {
+        id: `rst-${ts}`,
+        playlistId: plId,
+        explicitRestart: true,
+        reason: 'Playlist excluída',
+        timestamp: ts,
+      },
+      ...(dbData.pending_restarts || []).slice(0, 19),
+    ];
+    await saveCloudDb(dbData);
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('indoor_media_calls');
+        bc.postMessage({ type: 'RELOAD_PLAYLIST', playlistId: plId, explicitRestart: true, timestamp: ts });
+        setTimeout(() => bc.close(), 100);
+      }
+      localStorage.setItem(
+        'indoor_player_restart_cmd',
+        JSON.stringify({ playlistId: plId, explicitRestart: true, timestamp: ts })
+      );
+    } catch {}
+    return { message: 'Playlist excluída com sucesso.' };
+  }
+
   if (pathOnly === '/company/stores' && method === 'POST') {
     const newStore = {
       id: `store-${Date.now()}`,
@@ -1773,6 +1848,20 @@ export async function handleClientFallbackRequest(
     dbData.rss_feeds = [newRss, ...(dbData.rss_feeds || [])];
     await saveCloudDb(dbData);
     return newRss;
+  }
+
+  if (pathOnly.startsWith('/company/rss/') && method === 'PUT') {
+    const rId = pathOnly.split('/')[3];
+    let updatedRss: any = null;
+    dbData.rss_feeds = (dbData.rss_feeds || []).map((r: any) => {
+      if (r.id === rId) {
+        updatedRss = { ...r, ...body, updated_at: new Date().toISOString() };
+        return updatedRss;
+      }
+      return r;
+    });
+    await saveCloudDb(dbData);
+    return updatedRss || { id: rId, ...body };
   }
 
   if (pathOnly.startsWith('/company/rss/') && method === 'DELETE') {

@@ -2192,13 +2192,26 @@ apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole(
   });
 });
 
-apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const user = req.user!;
   const data = db.getData();
   const idx = data.playlists.findIndex((p) => p.id === id && (user.role === 'admin' || p.company_id === user.company_id));
+
+  data.deleted_playlist_ids = data.deleted_playlist_ids || [];
+  if (!data.deleted_playlist_ids.includes(id)) {
+    data.deleted_playlist_ids.push(id);
+  }
+
   if (idx === -1) {
-    return res.status(404).json({ error: 'Playlist não encontrada.' });
+    // Idempotente: se já foi removida anteriormente ou apenas no fallback, confirma limpeza
+    const existsInOtherCompany = data.playlists.some((p) => p.id === id);
+    if (existsInOtherCompany) {
+      return res.status(403).json({ error: 'Sem permissão para excluir esta playlist.' });
+    }
+    db.persist();
+    await saveDatabaseToFirestoreNow(data).catch(() => {});
+    return res.json({ message: 'Playlist excluída com sucesso.' });
   }
 
   const companyId = data.playlists[idx].company_id;
@@ -2211,7 +2224,7 @@ apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', '
     }
   }
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await saveDatabaseToFirestoreNow(data).catch(() => {});
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
