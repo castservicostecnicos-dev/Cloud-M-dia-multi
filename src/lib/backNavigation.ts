@@ -3,13 +3,16 @@
 
 type BackHandler = () => boolean;
 
+const SESSION_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const handlersStack: BackHandler[] = [];
 let exitPromptCallback: (() => void) | null = null;
 let exitModalBackHandler: BackHandler | null = null;
 let isInitialized = false;
 let hasUserActivatedTrap = false;
 let allowNextBrowserExit = false;
+let startedAtRootOfHistory = false;
 let trapSeq = 1;
+let lastActivatedPushAt = 0;
 
 export function registerBackHandler(handler: BackHandler): () => void {
   handlersStack.push(handler);
@@ -27,22 +30,86 @@ export function setExitModalBackHandler(handler: BackHandler | null) {
   exitModalBackHandler = handler;
 }
 
-function pushTrapState(fromUserGesture = false) {
-  if (typeof window === 'undefined' || allowNextBrowserExit) return;
+function hasRealUserActivation(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  const nav = navigator as Navigator & {
+    userActivation?: { isActive: boolean; hasBeenActive: boolean };
+  };
+  if (nav.userActivation && typeof nav.userActivation.isActive === 'boolean') {
+    return nav.userActivation.isActive;
+  }
+  return true;
+}
+
+function isOwnSessionState(state: any): boolean {
+  return Boolean(state && state.sessionId === SESSION_ID);
+}
+
+function getCurrentDepth(): number {
+  if (typeof window === 'undefined') return 0;
+  const s = window.history.state;
+  if (isOwnSessionState(s) && typeof s.depth === 'number') return s.depth;
+  return 0;
+}
+
+function ensureBaseHistoryState() {
+  if (typeof window === 'undefined') return;
   try {
-    // Only replace base once if not yet tagged
-    if (!window.history.state || (!window.history.state.appBase && !window.history.state.appTrap)) {
-      window.history.replaceState({ appBase: true }, '', window.location.href);
-    }
-    if (!window.history.state?.appTrap || (fromUserGesture && !hasUserActivatedTrap)) {
-      window.history.pushState(
-        { appTrap: true, seq: trapSeq++, activated: fromUserGesture, ts: Date.now() },
+    const state = window.history.state;
+    if (!isOwnSessionState(state) || (!state.appBase && !state.appTrap)) {
+      window.history.replaceState(
+        { appBase: true, depth: 0, sessionId: SESSION_ID },
         '',
         window.location.href
       );
-      if (fromUserGesture) {
-        hasUserActivatedTrap = true;
-      }
+    }
+  } catch {}
+}
+
+function pushActivatedTrapState() {
+  if (typeof window === 'undefined' || allowNextBrowserExit) return;
+
+  // CRITICAL: Never call history.pushState without genuine transient user activation.
+  // In Chromium's History Manipulation Intervention, ANY unactivated pushState marks the
+  // current/base entry as skippable, causing the Android Back button to skip right past our
+  // app without firing popstate!
+  if (!hasRealUserActivation()) {
+    return;
+  }
+
+  try {
+    ensureBaseHistoryState();
+
+    const currentState = window.history.state;
+    const isOwnTrap = isOwnSessionState(currentState) && Boolean(currentState.appTrap);
+    const isActivated = isOwnSessionState(currentState) && Boolean(currentState.activated);
+    const currentDepth = getCurrentDepth();
+    const now = Date.now();
+
+    const needsPrimaryActivation = !hasUserActivatedTrap || !isOwnTrap || !isActivated;
+    // Maintain up to 3 activated trap levels across distinct gestures so consecutive Back
+    // presses (e.g. close modal -> leave sub-tab -> show exit prompt) all fire popstate.
+    const canAddCushion =
+      isOwnTrap &&
+      isActivated &&
+      currentDepth < 3 &&
+      now - lastActivatedPushAt >= 180;
+
+    if (needsPrimaryActivation || canAddCushion) {
+      window.history.pushState(
+        {
+          appTrap: true,
+          seq: trapSeq++,
+          depth: currentDepth + 1,
+          activated: true,
+          sessionId: SESSION_ID,
+          ts: now,
+        },
+        '',
+        window.location.href
+      );
+      hasUserActivatedTrap = true;
+      lastActivatedPushAt = now;
     }
   } catch {}
 }
@@ -50,20 +117,36 @@ function pushTrapState(fromUserGesture = false) {
 export function allowAppExitAndGoBack() {
   if (typeof window === 'undefined') return;
   allowNextBrowserExit = true;
+  hasUserActivatedTrap = false;
+
+  const currentDepth = getCurrentDepth();
+  const stepsBack = Math.max(1, currentDepth + 1);
+
   try {
-    if (window.history.length > 1) {
-      window.history.go(-2);
+    if (startedAtRootOfHistory) {
+      // Standalone PWA or fresh tab with no prior history entry before appBase
+      if (currentDepth > 0 && window.history.length > currentDepth) {
+        window.history.go(-currentDepth);
+      }
+      window.close();
+    } else if (window.history.length > stepsBack) {
+      window.history.go(-stepsBack);
+    } else {
+      window.close();
+      if (window.history.length > 1) {
+        window.history.go(-(window.history.length - 1));
+      }
     }
   } catch {
     try {
       window.history.back();
     } catch {}
   }
+
   setTimeout(() => {
     allowNextBrowserExit = false;
     hasUserActivatedTrap = false;
-    pushTrapState(false);
-  }, 500);
+  }, 600);
 }
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -101,32 +184,44 @@ export function initDeviceBackNavigation() {
   if (typeof window === 'undefined' || isInitialized) return;
   isInitialized = true;
 
-  // Initial trap on mount
-  pushTrapState(false);
+  // Record whether this tab/PWA started with no preceding browser history BEFORE pushing any traps
+  startedAtRootOfHistory = window.history.length <= 1;
 
-  // Re-arm trap inside real user gestures so Android Chrome's History Manipulation Intervention
-  // never skips our history entry when the hardware Back button is pressed.
-  const armOnUserGesture = () => {
+  // Tag the base entry via replaceState only (replaceState never triggers Chromium's intervention)
+  ensureBaseHistoryState();
+
+  const armOnUserGesture = (e: Event) => {
     if (allowNextBrowserExit) return;
-    if (!hasUserActivatedTrap || !window.history.state?.appTrap) {
-      pushTrapState(true);
+    const target = e.target as HTMLElement | null;
+    if (target && typeof target.closest === 'function' && target.closest('[data-no-back-trap="true"]')) {
+      return;
     }
+    pushActivatedTrapState();
   };
 
   const handlePopState = () => {
     if (allowNextBrowserExit) return;
 
-    // Force immediate re-arming and require fresh user-activated push on next tap
-    hasUserActivatedTrap = false;
-    try {
-      window.history.pushState(
-        { appTrap: true, seq: trapSeq++, activated: false, ts: Date.now() },
-        '',
-        window.location.href
-      );
-    } catch {}
+    const landedState = window.history.state;
+    const landedOnActivatedTrap = Boolean(
+      isOwnSessionState(landedState) && landedState.appTrap && landedState.activated
+    );
+
+    // Do NOT push an unactivated trap inside popstate (that would mark landedState skippable
+    // under Chromium's History Manipulation Intervention). Instead, the user's next tap
+    // ("Continuar no App", closing toast, etc.) will immediately re-arm with user activation.
+    hasUserActivatedTrap = landedOnActivatedTrap;
 
     dispatchBackAction();
+  };
+
+  const handlePageShow = () => {
+    if (allowNextBrowserExit) return;
+    const currentState = window.history.state;
+    hasUserActivatedTrap = Boolean(
+      isOwnSessionState(currentState) && currentState.appTrap && currentState.activated
+    );
+    ensureBaseHistoryState();
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -150,10 +245,12 @@ export function initDeviceBackNavigation() {
     }
   };
 
-  window.addEventListener('pointerdown', armOnUserGesture, { capture: true, passive: true });
-  window.addEventListener('touchstart', armOnUserGesture, { capture: true, passive: true });
+  window.addEventListener('pointerup', armOnUserGesture, { capture: true, passive: true });
+  window.addEventListener('touchend', armOnUserGesture, { capture: true, passive: true });
   window.addEventListener('click', armOnUserGesture, { capture: true, passive: true });
   window.addEventListener('keydown', armOnUserGesture, { capture: true, passive: true });
+  window.addEventListener('submit', armOnUserGesture, { capture: true, passive: true });
   window.addEventListener('popstate', handlePopState);
+  window.addEventListener('pageshow', handlePageShow);
   window.addEventListener('keydown', handleKeyDown, { capture: true });
 }

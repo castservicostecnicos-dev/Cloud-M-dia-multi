@@ -355,6 +355,7 @@ export default function App() {
           </button>
           <button
             type="button"
+            data-no-back-trap={!user && !isDirectPlayerMode && !simulatedPlayerCode ? 'true' : undefined}
             onClick={handleConfirmAppExit}
             className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-md"
           >

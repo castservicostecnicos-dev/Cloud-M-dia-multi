@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Tv, KeyRound, ArrowRight, Monitor, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { api, setStoredToken } from '../lib/api';
 import { User, Player } from '../types';
+import { registerBackHandler } from '../lib/backNavigation';
 
 interface LoginViewProps {
   onLoginSuccess: (data: { user: User; company?: { id: string; name: string }; player?: Player }) => void;
@@ -20,6 +21,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, showToast 
   const [forgotOpen, setForgotOpen] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSuccess, setForgotSuccess] = useState('');
+
+  useEffect(() => {
+    if (!forgotOpen) return;
+    return registerBackHandler(() => {
+      setForgotOpen(false);
+      return true;
+    });
+  }, [forgotOpen]);
 
   // Mandatory password change modal
   const [mustChangeUser, setMustChangeUser] = useState<User | null>(null);
