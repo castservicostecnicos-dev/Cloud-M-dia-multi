@@ -11,6 +11,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { Media } from '../types';
+import { API_BASE_URL } from '../lib/api';
 import { resolveMediaDisplayUrl, extractDriveFileId } from '../lib/googleDrive';
 import { getIndexedDbMedia } from '../lib/indexedDbMedia';
 
@@ -33,6 +34,9 @@ interface MediaThumbnailProps {
   onPreview?: (media: any) => void;
 }
 
+const isPrivateR2Url = (url?: string | null): boolean =>
+  Boolean(url && typeof url === 'string' && url.includes('.r2.cloudflarestorage.com'));
+
 export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
   media,
   className = '',
@@ -44,15 +48,29 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
   onPreview,
 }) => {
   const getInitialMediaSrc = (m: any): string => {
+    const proxyStreamUrl = m?.id ? `${API_BASE_URL}/media/stream/${m.id}?proxy=1` : '';
     if (m.type === 'video') {
-      if (m.r2_url && typeof m.r2_url === 'string' && m.r2_url.startsWith('http')) return m.r2_url;
-      if (m.file_url && m.file_url.startsWith('http') && !m.file_url.includes('drive.google.com')) return m.file_url;
+      if (m.r2_url && typeof m.r2_url === 'string' && m.r2_url.startsWith('http')) {
+        return isPrivateR2Url(m.r2_url) && proxyStreamUrl ? proxyStreamUrl : m.r2_url;
+      }
+      if (m.file_url && m.file_url.startsWith('http') && !m.file_url.includes('drive.google.com')) {
+        return isPrivateR2Url(m.file_url) && proxyStreamUrl ? proxyStreamUrl : m.file_url;
+      }
       if (m.local_url && m.local_url.startsWith('/uploads/')) return m.local_url;
-      if (m.id) return `/api/media/stream/${m.id}`;
+      if (proxyStreamUrl) return proxyStreamUrl;
       if (m.file_url && m.file_url.startsWith('/uploads/')) return m.file_url;
     }
-    if (m.r2_url && typeof m.r2_url === 'string' && m.r2_url.startsWith('http')) return m.r2_url;
-    return resolveMediaDisplayUrl(m.file_url);
+    if (m.r2_url && typeof m.r2_url === 'string' && m.r2_url.startsWith('http')) {
+      return isPrivateR2Url(m.r2_url) && proxyStreamUrl ? proxyStreamUrl : m.r2_url;
+    }
+    const resolved = resolveMediaDisplayUrl(m.file_url);
+    if (isPrivateR2Url(resolved) && proxyStreamUrl) {
+      return proxyStreamUrl;
+    }
+    if ((!resolved || resolved.startsWith('idb:')) && proxyStreamUrl) {
+      return resolved || proxyStreamUrl;
+    }
+    return resolved;
   };
 
   const [hasError, setHasError] = useState(false);
@@ -62,15 +80,24 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => getInitialMediaSrc(media));
   const videoRef = useRef<HTMLVideoElement>(null);
+  const triedFallbacksRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let isMounted = true;
+    triedFallbacksRef.current.clear();
+    setHasError(false);
+    setIsRecovering(false);
+
     const initial = getInitialMediaSrc(media);
     setResolvedSrc(initial);
-    if (initial && initial.startsWith('data:')) {
-      return;
+
+    // Only proactively query IndexedDB / Firestore binary chunks if URL is missing or idb:
+    if (initial && !initial.startsWith('idb:')) {
+      return () => {
+        isMounted = false;
+      };
     }
-    // Proactively check local cache or Firestore cloud binary if file_url is idb: or local upload
+
     getIndexedDbMedia(media).then((recovered) => {
       if (recovered && isMounted) {
         setResolvedSrc(recovered);
@@ -80,39 +107,61 @@ export const MediaThumbnail: React.FC<MediaThumbnailProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [media.id, media.file_url, (media as any).local_url]);
+  }, [media.id, media.file_url, (media as any).local_url, (media as any).r2_url]);
 
   const handleMediaError = (target: HTMLImageElement | HTMLVideoElement) => {
-    const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
-    if (driveId && !(target.src || '').includes('thumbnail') && !(target.src || '').includes('uc?')) {
-      target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
-      return;
-    }
-    if ((media as any).local_url && target.src !== (media as any).local_url) {
-      target.src = (media as any).local_url;
-      return;
-    }
+    const tried = triedFallbacksRef.current;
 
-    if (media.type === 'video' && media.id && !(target.src || '').includes('/api/media/stream/')) {
-      const streamUrl = `/api/media/stream/${media.id}`;
+    // 1. Try server proxy stream (handles local disk, private R2 S3, Firestore binary chunks, and Drive)
+    if (media.id && !tried.has('proxy') && !(target.src || '').includes('/media/stream/')) {
+      tried.add('proxy');
+      const streamUrl = `${API_BASE_URL}/media/stream/${media.id}?proxy=1`;
       target.src = streamUrl;
       setResolvedSrc(streamUrl);
       return;
     }
 
-    setIsRecovering(true);
-    getIndexedDbMedia(media)
-      .then((recovered) => {
-        if (recovered && target.src !== recovered) {
-          setResolvedSrc(recovered);
-          target.src = recovered;
-          setHasError(false);
-        } else {
-          setHasError(true);
-        }
-      })
-      .catch(() => setHasError(true))
-      .finally(() => setIsRecovering(false));
+    // 2. Try local /uploads/ path if available
+    const localUrl = (media as any).local_url;
+    if (localUrl && !tried.has('local') && target.src !== localUrl) {
+      tried.add('local');
+      target.src = localUrl;
+      setResolvedSrc(localUrl);
+      return;
+    }
+
+    // 3. Try Google Drive stream/thumbnail
+    const driveId = (media as any).drive_file_id || extractDriveFileId(media.file_url);
+    if (driveId && !tried.has('drive')) {
+      tried.add('drive');
+      const driveFallback =
+        media.type === 'video'
+          ? `${API_BASE_URL}/drive/stream/${driveId}`
+          : `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+      target.src = driveFallback;
+      setResolvedSrc(driveFallback);
+      return;
+    }
+
+    // 4. Last resort: IndexedDB / Firestore binary chunks
+    if (!tried.has('idb')) {
+      tried.add('idb');
+      setIsRecovering(true);
+      getIndexedDbMedia(media)
+        .then((recovered) => {
+          if (recovered && target.src !== recovered) {
+            setResolvedSrc(recovered);
+            target.src = recovered;
+            setHasError(false);
+          } else {
+            setHasError(true);
+          }
+        })
+        .catch(() => setHasError(true))
+        .finally(() => setIsRecovering(false));
+    } else {
+      setHasError(true);
+    }
   };
 
   // Determine media extension or format label

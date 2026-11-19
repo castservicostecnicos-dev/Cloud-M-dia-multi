@@ -173,9 +173,13 @@ export async function uploadToR2(params: {
   };
 }
 
-export function extractR2Key(keyOrUrl: string | undefined): string | null {
+export function extractR2Key(keyOrUrl: string | undefined, bucketName?: string): string | null {
   if (!keyOrUrl) return null;
   let key = String(keyOrUrl).trim();
+
+  if (key.startsWith('/api/drive/stream/') || key.includes('/api/drive/stream/')) {
+    return null;
+  }
 
   // If it's a URL
   if (key.includes('://')) {
@@ -191,6 +195,12 @@ export function extractR2Key(keyOrUrl: string | undefined): string | null {
     key = key.replace(/^\/+/, '');
     key = key.replace(/^api\/media\/stream\/+/, '');
     key = key.replace(/^uploads\/+/, '');
+  }
+
+  // Strip path-style bucket prefix if present (e.g. "<bucket>/<key>")
+  if (bucketName) {
+    const escapedBucket = bucketName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    key = key.replace(new RegExp(`^${escapedBucket}/+`, 'i'), '');
   }
 
   // Remove trailing slashes
@@ -328,19 +338,8 @@ export async function getObjectFromR2(keyOrUrl: string, range?: string): Promise
     const config = getEffectiveR2Config();
     if (!isR2Configured(config)) return null;
 
-    let key = keyOrUrl.trim();
-    if (key.includes('://')) {
-      try {
-        const parsed = new URL(key);
-        key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
-      } catch {
-        key = key.split('/').pop() || key;
-      }
-    } else {
-      key = key.replace(/^\/+/, '').replace(/^uploads\/+/, '');
-    }
-
-    if (!key || key.startsWith('widget:') || key.startsWith('data:') || key.startsWith('idb:')) {
+    const key = extractR2Key(keyOrUrl, config.bucket_name);
+    if (!key) {
       return null;
     }
 

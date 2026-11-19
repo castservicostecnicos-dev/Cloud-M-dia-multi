@@ -209,8 +209,73 @@ export async function loadDatabaseFromFirestore(): Promise<FirestoreLoadResult> 
   }
 }
 
+let writeQueuePromise: Promise<boolean> = Promise.resolve(true);
+let syncWriteSeq = 0;
+let lastCompletedWriteSeq = 0;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+async function performFirestoreWrite(sanitized: any, seq: number): Promise<boolean> {
+  if (isQuotaBlocked()) {
+    return false;
+  }
+
+  // If a newer write was already completed or queued behind us, skip redundant stale write
+  if (seq < syncWriteSeq || seq <= lastCompletedWriteSeq) {
+    return true;
+  }
+
+  const db = getFirestoreDb();
+  if (!db) return false;
+
+  try {
+    const targetDoc = doc(db, 'app_data', FIRESTORE_DOCUMENT_ID);
+    const now = new Date().toISOString();
+
+    await withTimeout(
+      setDoc(targetDoc, {
+        version: 1,
+        updated_at: now,
+        stats: {
+          companies: sanitized.companies?.length || 0,
+          company_stores: sanitized.company_stores?.length || 0,
+          players: sanitized.players?.length || 0,
+          users: sanitized.users?.length || 0,
+          playlists: sanitized.playlists?.length || 0,
+          media: sanitized.media?.length || 0,
+        },
+        data: JSON.stringify(sanitized),
+      }),
+      4500,
+      'Firestore write'
+    );
+
+    lastCompletedWriteSeq = Math.max(lastCompletedWriteSeq, seq);
+    lastSyncTimestamp = now;
+    lastSyncError = null;
+    console.log(`[Firebase Firestore] Database synced successfully at ${now} (Companies: ${sanitized.companies?.length || 0}, Stores: ${sanitized.company_stores?.length || 0})`);
+    return true;
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    if (isQuotaExceededError(err)) {
+      markQuotaExceeded(errMsg);
+      return false;
+    }
+    console.warn('[Firebase Firestore] Cloud sync skipped (local persistence remains active):', errMsg);
+    lastSyncError = errMsg;
+    return false;
+  }
+}
+
 /**
- * Save database snapshot directly to Firebase Firestore
+ * Save database snapshot directly to Firebase Firestore (serialized & cancels stale queued syncs)
  */
 export async function saveDatabaseToFirestoreNow(data: any): Promise<boolean> {
   if (isQuotaBlocked()) {
@@ -232,39 +297,29 @@ export async function saveDatabaseToFirestoreNow(data: any): Promise<boolean> {
     return false;
   }
 
-  try {
-    const targetDoc = doc(db, 'app_data', FIRESTORE_DOCUMENT_ID);
-    const sanitized = JSON.parse(JSON.stringify(data));
-    const now = new Date().toISOString();
+  // Cancel any older pending debounced sync so it cannot overwrite this newer snapshot
+  if (syncDebounceTimer) {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = null;
+  }
+  pendingDataToSync = null;
 
-    await setDoc(targetDoc, {
-      version: 1,
-      updated_at: now,
-      stats: {
-        companies: sanitized.companies?.length || 0,
-        company_stores: sanitized.company_stores?.length || 0,
-        players: sanitized.players?.length || 0,
-        users: sanitized.users?.length || 0,
-        playlists: sanitized.playlists?.length || 0,
-        media: sanitized.media?.length || 0,
-      },
-      data: JSON.stringify(sanitized),
+  const sanitized = JSON.parse(JSON.stringify(data));
+  const seq = ++syncWriteSeq;
+
+  const nextWrite = writeQueuePromise
+    .catch(() => false)
+    .then(async () => {
+      isSyncing = true;
+      try {
+        return await performFirestoreWrite(sanitized, seq);
+      } finally {
+        isSyncing = false;
+      }
     });
 
-    lastSyncTimestamp = now;
-    lastSyncError = null;
-    console.log(`[Firebase Firestore] Database synced successfully at ${now} (Companies: ${sanitized.companies?.length || 0}, Stores: ${sanitized.company_stores?.length || 0})`);
-    return true;
-  } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    if (isQuotaExceededError(err)) {
-      markQuotaExceeded(errMsg);
-      return false;
-    }
-    console.warn('[Firebase Firestore] Cloud sync skipped (local persistence remains active):', errMsg);
-    lastSyncError = errMsg;
-    return false;
-  }
+  writeQueuePromise = nextWrite;
+  return await nextWrite;
 }
 
 /**
@@ -283,22 +338,30 @@ export function queueFirestoreSync(data: any) {
   }
 
   syncDebounceTimer = setTimeout(async () => {
-    if (isSyncing || !pendingDataToSync) return;
+    syncDebounceTimer = null;
+    if (!pendingDataToSync) return;
 
-    isSyncing = true;
     const toSave = pendingDataToSync;
     pendingDataToSync = null;
 
-    try {
-      await saveDatabaseToFirestoreNow(toSave);
-    } finally {
-      isSyncing = false;
-      // If new data arrived while saving, trigger another sync
-      if (pendingDataToSync && isSyncEnabled) {
-        queueFirestoreSync(pendingDataToSync);
-      }
+    await saveDatabaseToFirestoreNow(toSave);
+
+    // If new data arrived while saving, trigger another sync
+    if (pendingDataToSync && isSyncEnabled) {
+      queueFirestoreSync(pendingDataToSync);
     }
   }, 1000);
+}
+
+export async function flushFirestoreSyncIfPending(): Promise<boolean> {
+  if (pendingDataToSync) {
+    const toSave = pendingDataToSync;
+    return await saveDatabaseToFirestoreNow(toSave);
+  }
+  if (isSyncing) {
+    return await writeQueuePromise.catch(() => false);
+  }
+  return true;
 }
 
 export function getFirestoreSyncStatus() {

@@ -335,22 +335,94 @@ function markClientQuotaExceeded(err: any) {
   }
 }
 
+function mergeArrById(cloudArr: any[] = [], localArr: any[] = []): any[] {
+  const map = new Map<string, any>();
+  for (const item of cloudArr || []) {
+    if (item && item.id) {
+      map.set(item.id, item);
+    }
+  }
+  for (const localItem of localArr || []) {
+    if (!localItem || !localItem.id) continue;
+    const existing = map.get(localItem.id);
+    if (!existing) {
+      map.set(localItem.id, localItem);
+    } else if (localItem.updated_at && existing.updated_at) {
+      const localTime = new Date(localItem.updated_at).getTime();
+      const cloudTime = new Date(existing.updated_at).getTime();
+      if (!Number.isNaN(localTime) && (Number.isNaN(cloudTime) || localTime >= cloudTime)) {
+        map.set(localItem.id, localItem);
+      }
+    } else if (localItem.updated_at && !existing.updated_at) {
+      map.set(localItem.id, localItem);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function getLatestLocalStorageDb(): any | null {
+  try {
+    const localRaw = localStorage.getItem(LOCAL_DB_CACHE_KEY);
+    if (localRaw) {
+      const parsedLocal = JSON.parse(localRaw);
+      if ((parsedLocal?.companies?.length || 0) > 0) {
+        return normalizeDbShape(parsedLocal);
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function mergeCloudAndLocalDb(cloudRaw: any, localRaw: any): any {
+  const cloud = normalizeDbShape(cloudRaw);
+  if (!localRaw || (localRaw.companies?.length || 0) === 0) {
+    return cloud;
+  }
+  const local = normalizeDbShape(localRaw);
+  const deletedPlaylistIds = Array.from(
+    new Set([...(cloud.deleted_playlist_ids || []), ...(local.deleted_playlist_ids || [])])
+  ).filter(Boolean);
+  const deletedPlaylistSet = new Set(deletedPlaylistIds);
+
+  return normalizeDbShape({
+    ...cloud,
+    users: mergeArrById(cloud.users, local.users),
+    companies: mergeArrById(cloud.companies, local.companies),
+    company_stores: mergeArrById(cloud.company_stores, local.company_stores),
+    plans: mergeArrById(cloud.plans, local.plans),
+    players: mergeArrById(cloud.players, local.players),
+    operators: mergeArrById(cloud.operators, local.operators),
+    playlists: mergeArrById(cloud.playlists, local.playlists).filter((pl: any) => pl && !deletedPlaylistSet.has(pl.id)),
+    media: mergeArrById(cloud.media, local.media),
+    rss_feeds: mergeArrById(cloud.rss_feeds, local.rss_feeds),
+    pending_restarts: mergeArrById(cloud.pending_restarts, local.pending_restarts).slice(0, 20),
+    deleted_media_ids: Array.from(new Set([...(cloud.deleted_media_ids || []), ...(local.deleted_media_ids || [])])),
+    deleted_playlist_ids: deletedPlaylistIds,
+  });
+}
+
+function getLastRestartCommandTimestamp(): number {
+  try {
+    const raw = localStorage.getItem('indoor_player_restart_cmd');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return Number(parsed?.timestamp || 0);
+    }
+  } catch {}
+  return 0;
+}
+
 async function loadCloudDb(forceRefresh = false): Promise<any> {
-  if (cachedDb && (cachedDb.companies?.length || 0) > 0 && !forceRefresh && Date.now() - lastLoadedAt < 5000) {
-    return cachedDb;
+  const localFromStorage = getLatestLocalStorageDb();
+  const restartCmdTs = getLastRestartCommandTimestamp();
+  const hasNewRestartCmd = restartCmdTs > lastLoadedAt;
+
+  if (localFromStorage) {
+    cachedDb = cachedDb ? mergeCloudAndLocalDb(cachedDb, localFromStorage) : localFromStorage;
   }
 
-  // 1. Check local cache first if in-memory cachedDb is not populated
-  if (!cachedDb) {
-    try {
-      const localRaw = localStorage.getItem(LOCAL_DB_CACHE_KEY);
-      if (localRaw) {
-        const parsedLocal = JSON.parse(localRaw);
-        if ((parsedLocal?.companies?.length || 0) > 0) {
-          cachedDb = normalizeDbShape(parsedLocal);
-        }
-      }
-    } catch {}
+  if (cachedDb && (cachedDb.companies?.length || 0) > 0 && !forceRefresh && !hasNewRestartCmd && Date.now() - lastLoadedAt < 5000) {
+    return cachedDb;
   }
 
   // If client quota was exceeded, bypass cloud read and stay on local cache
@@ -374,7 +446,7 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
       const raw = snap.data();
       if (raw && typeof raw.data === 'string') {
         const parsed = JSON.parse(raw.data);
-        cachedDb = normalizeDbShape(parsed);
+        cachedDb = mergeCloudAndLocalDb(parsed, cachedDb || localFromStorage);
         lastLoadedAt = Date.now();
         try {
           if ((cachedDb.companies?.length || 0) > 0) {
@@ -391,7 +463,7 @@ async function loadCloudDb(forceRefresh = false): Promise<any> {
       try {
         const restData = await fetchFirestoreDocumentViaRest();
         if (restData) {
-          cachedDb = normalizeDbShape(restData);
+          cachedDb = mergeCloudAndLocalDb(restData, cachedDb || localFromStorage);
           lastLoadedAt = Date.now();
           try {
             if ((cachedDb.companies?.length || 0) > 0) {
@@ -548,7 +620,8 @@ export async function handleClientFallbackRequest(
   const method = (options.method || 'GET').toUpperCase();
   const body = options.body && typeof options.body === 'string' ? JSON.parse(options.body) : {};
   const pathOnly = endpoint.split('?')[0];
-  const dbData = await loadCloudDb();
+  const isPlayerPoll = pathOnly === '/player/current' || pathOnly === '/player/active-call';
+  const dbData = await loadCloudDb(isPlayerPoll && Date.now() - getLastRestartCommandTimestamp() < 10000);
 
   // 1. AUTH LOGIN
   if (pathOnly === '/auth/login' && method === 'POST') {

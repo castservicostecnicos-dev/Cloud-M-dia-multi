@@ -2002,7 +2002,7 @@ apiRouter.get('/company/playlists', requireAuth, requireRole('company', 'admin')
   res.json(playlists);
 });
 
-apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const data = db.getData();
   const companyId = req.user!.role === 'admin'
     ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
@@ -2067,7 +2067,7 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'
 
   data.playlists.push(newPlaylist);
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await db.syncToFirestoreNow().catch(() => false);
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
@@ -2084,7 +2084,7 @@ apiRouter.post('/company/playlists', requireAuth, requireRole('company', 'admin'
   res.status(201).json(enrichPlaylistWithMedia(newPlaylist, data.media, data));
 });
 
-apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const user = req.user!;
   const data = db.getData();
@@ -2144,7 +2144,7 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'adm
   playlist.updated_at = new Date().toISOString();
 
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await db.syncToFirestoreNow().catch(() => false);
 
   // Automatically broadcast reload command to connected players and sync dashboards
   try {
@@ -2162,7 +2162,7 @@ apiRouter.put('/company/playlists/:id', requireAuth, requireRole('company', 'adm
   res.json(enrichPlaylistWithMedia(playlist, data.media, data));
 });
 
-apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const user = req.user!;
   const data = db.getData();
@@ -2174,7 +2174,7 @@ apiRouter.post('/company/playlists/:id/toggle-status', requireAuth, requireRole(
   playlist.active = !playlist.active;
   playlist.updated_at = new Date().toISOString();
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await db.syncToFirestoreNow().catch(() => false);
 
   try {
     realtimeHub.broadcastMediaChange(playlist.company_id, 'updated');
@@ -2240,7 +2240,7 @@ apiRouter.delete('/company/playlists/:id', requireAuth, requireRole('company', '
 });
 
 // Quick add Weather/Clock to playlist
-apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const data = db.getData();
   const companyId = req.user!.role === 'admin'
     ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
@@ -2312,7 +2312,7 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
   playlist.items = dedupePlaylistItems(playlist.items);
   playlist.updated_at = now;
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await db.syncToFirestoreNow().catch(() => false);
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
@@ -2331,7 +2331,7 @@ apiRouter.post('/company/weather/add-to-playlist', requireAuth, requireRole('com
 });
 
 // Quick add RSS news feed to playlist
-apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const data = db.getData();
   const companyId = req.user!.role === 'admin'
     ? ((req.body.companyId || req.body.company_id || (req.query.company_id as string) || data.companies[0]?.id) as string)
@@ -2400,7 +2400,7 @@ apiRouter.post('/company/rss/add-to-playlist', requireAuth, requireRole('company
   playlist.items = dedupePlaylistItems(playlist.items);
   playlist.updated_at = now;
   db.persist();
-  saveDatabaseToFirestoreNow(data).catch(() => {});
+  await db.syncToFirestoreNow().catch(() => false);
 
   try {
     realtimeHub.broadcastMediaChange(companyId, 'updated');
@@ -2457,22 +2457,37 @@ apiRouter.post('/upload/chunk', requireAuth, async (req: AuthenticatedRequest, r
 
     let uniqueName = `media-${safeUploadId}-${safeBaseName}.${detectedExt}`;
     let filePath = path.join(uploadsDir, uniqueName);
+    const chunkDir = path.join(uploadsDir, '.chunks', safeUploadId);
+    if (!fs.existsSync(chunkDir)) {
+      fs.mkdirSync(chunkDir, { recursive: true });
+    }
 
     const rawBase64 = typeof chunkData === 'string' && chunkData.includes(';base64,')
       ? chunkData.split(';base64,')[1]
       : String(chunkData);
 
     const buffer = Buffer.from(rawBase64, 'base64');
+    const chunkIdx = Number(chunkIndex);
+    const totalChunkCount = Math.max(1, Number(totalChunks));
+    const chunkPartPath = path.join(chunkDir, `chunk_${String(chunkIdx).padStart(6, '0')}.part`);
+    fs.writeFileSync(chunkPartPath, buffer);
 
-    if (Number(chunkIndex) === 0) {
-      fs.writeFileSync(filePath, buffer);
-    } else {
-      fs.appendFileSync(filePath, buffer);
-    }
-
-    const isLastChunk = Number(chunkIndex) >= Number(totalChunks) - 1;
+    const isLastChunk = chunkIdx >= totalChunkCount - 1;
     if (isLastChunk) {
-      let fullBuffer = fs.readFileSync(filePath);
+      // Assemble chunks sequentially (safe & idempotent against retries)
+      const partBuffers: Buffer[] = [];
+      for (let idx = 0; idx < totalChunkCount; idx++) {
+        const partFile = path.join(chunkDir, `chunk_${String(idx).padStart(6, '0')}.part`);
+        if (!fs.existsSync(partFile)) {
+          return res.status(400).json({ error: `Parte ${idx + 1} do arquivo ausente. Reenvie o arquivo.` });
+        }
+        partBuffers.push(fs.readFileSync(partFile));
+      }
+      let fullBuffer = Buffer.concat(partBuffers);
+      fs.writeFileSync(filePath, fullBuffer);
+      try {
+        fs.rmSync(chunkDir, { recursive: true, force: true });
+      } catch {}
 
       const isVideo =
         detectedExt === 'mp4' ||
@@ -2774,7 +2789,7 @@ apiRouter.post('/company/media', requireAuth, requireRole('company', 'admin'), (
 
   const now = new Date().toISOString();
   const newMedia: Media = {
-    id: `med-${Date.now()}`,
+    id: `med-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     company_id: companyId,
     name,
     type: mediaType,
@@ -3100,7 +3115,7 @@ apiRouter.delete('/company/media/:id', requireAuth, requireRole('company', 'admi
 });
 
 // Adicionar uma mídia existente a TODAS as playlists da empresa de uma só vez
-apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRole('company', 'admin'), (req: AuthenticatedRequest, res) => {
+apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRole('company', 'admin'), async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const user = req.user!;
   const { duration, restartPlayers, forceDuplicate } = req.body || {};
@@ -3146,6 +3161,7 @@ apiRouter.post('/company/media/:id/add-to-all-playlists', requireAuth, requireRo
   });
 
   db.persist();
+  await db.syncToFirestoreNow().catch(() => false);
 
   if (restartPlayers !== false && updatedPlaylistsCount > 0) {
     try {
@@ -4562,8 +4578,9 @@ apiRouter.get('/player/active-call', (req, res) => {
 });
 
 // Endpoint to command players to restart/reload playlist immediately
-apiRouter.post('/player/restart', requireAuth, (req: AuthenticatedRequest, res) => {
+apiRouter.post('/player/restart', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
+    await db.flushPendingFirestoreSync().catch(() => false);
     const { playerId, playlistId, companyId, fullReload, reason } = req.body;
     const effectiveCompanyId =
       req.user?.role === 'admin'
@@ -6002,6 +6019,7 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
     }
 
     // 1.5. Fast redirect to direct public Cloudflare R2 URL when no local copy exists and proxy is not forced
+    // Never redirect browsers directly to private *.r2.cloudflarestorage.com S3 API endpoints (requires authenticated server proxy)
     const directR2Url =
       ((media as any)?.r2_url && String((media as any).r2_url).startsWith('http'))
         ? String((media as any).r2_url)
@@ -6009,16 +6027,33 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
         ? String(media.file_url)
         : '';
 
-    if (directR2Url && req.query.proxy !== '1') {
+    if (directR2Url && req.query.proxy !== '1' && !directR2Url.includes('.r2.cloudflarestorage.com')) {
       return res.redirect(302, directR2Url);
     }
 
-    // 2. Try Cloudflare R2 object
-    const targetKey = (media as any)?.r2_url || media?.file_url || (media as any)?.local_url || id;
+    // 2. Try Cloudflare R2 object across all candidate keys
+    const r2Candidates = Array.from(
+      new Set(
+        [
+          (media as any)?.r2_url,
+          (media as any)?.local_url,
+          media?.file_url && !String(media.file_url).startsWith('/api/drive/stream/') ? media.file_url : '',
+          id,
+        ].filter((k): k is string => Boolean(k && typeof k === 'string'))
+      )
+    );
     const effectiveRange = req.method === 'HEAD' ? 'bytes=0-0' : (rangeHeader ? String(rangeHeader) : undefined);
-    const r2Obj = await getObjectFromR2(targetKey, effectiveRange);
+    let r2Obj: Awaited<ReturnType<typeof getObjectFromR2>> = null;
+    let matchedR2Key = id;
+    for (const candidateKey of r2Candidates) {
+      r2Obj = await getObjectFromR2(candidateKey, effectiveRange);
+      if (r2Obj && r2Obj.body) {
+        matchedR2Key = candidateKey;
+        break;
+      }
+    }
     if (r2Obj && r2Obj.body) {
-      const keyOrName = ((media as any)?.unique_name || media?.name || targetKey || id || '').toLowerCase();
+      const keyOrName = ((media as any)?.unique_name || media?.name || matchedR2Key || id || '').toLowerCase();
       const isVideo = media?.type === 'video' || keyOrName.endsWith('.mp4') || keyOrName.endsWith('.webm') || keyOrName.endsWith('.avi') || keyOrName.endsWith('.mov');
       let determinedContentType = r2Obj.contentType;
       if (!determinedContentType || determinedContentType === 'application/octet-stream' || (isVideo && determinedContentType.startsWith('image/'))) {
@@ -6050,7 +6085,7 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       if (localFilename) {
         const destPath = path.join(uploadsDir, localFilename);
         if (!fs.existsSync(destPath)) {
-          getObjectFromR2(targetKey).then(async (fullObj) => {
+          getObjectFromR2(matchedR2Key).then(async (fullObj) => {
             if (fullObj && fullObj.body) {
               const outStream = fs.createWriteStream(destPath);
               if (typeof (fullObj.body as any).pipe === 'function') {
@@ -6073,8 +6108,15 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       }
     }
 
-    // 3. Fallback to Firestore binary chunk
-    const chunkBuffer = await loadMediaBinaryFromFirestore(localFilename || id);
+    // 3. Fallback to Firestore binary chunk across candidate keys
+    const fsCandidates = Array.from(
+      new Set([localFilename, media?.id, (media as any)?.unique_name, id].filter((k): k is string => Boolean(k)))
+    );
+    let chunkBuffer: Buffer | null = null;
+    for (const fsKey of fsCandidates) {
+      chunkBuffer = await loadMediaBinaryFromFirestore(fsKey);
+      if (chunkBuffer && chunkBuffer.length > 0) break;
+    }
     if (chunkBuffer && chunkBuffer.length > 0) {
       const keyOrName = ((media as any)?.unique_name || media?.name || localFilename || id || '').toLowerCase();
       const isVid = media?.type === 'video' || keyOrName.endsWith('.mp4') || keyOrName.endsWith('.webm') || keyOrName.endsWith('.avi') || keyOrName.endsWith('.mov');
@@ -6084,8 +6126,16 @@ apiRouter.get('/media/stream/:id', async (req, res) => {
       return res.send(chunkBuffer);
     }
 
-    // 4. Redirect to public URL if available
-    if (media?.file_url && media.file_url.startsWith('http')) {
+    // 3.5 Fallback to Google Drive stream if drive_file_id is available
+    const driveFileId =
+      (media as any)?.drive_file_id ||
+      (media?.file_url?.includes('/api/drive/stream/') ? media.file_url.split('/api/drive/stream/').pop()?.split('?')[0] : undefined);
+    if (driveFileId) {
+      return res.redirect(302, `/api/drive/stream/${driveFileId}`);
+    }
+
+    // 4. Redirect to public URL if available (excluding private R2 S3 domain)
+    if (media?.file_url && media.file_url.startsWith('http') && !media.file_url.includes('.r2.cloudflarestorage.com')) {
       return res.redirect(media.file_url);
     }
 
@@ -6300,6 +6350,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       name,
       duration,
       clientDriveToken,
+      preUploadedMeta,
     } = req.body;
 
     if (!fileData && !uploadedFilename) {
@@ -6337,6 +6388,8 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       const ext = filename.split('.').pop()?.toLowerCase();
       if (ext && ext.length <= 5) detectedExt = ext;
     }
+
+    const alreadyProcessedByChunk = Boolean(preUploadedMeta?.skipDuplicateProcessing && uploadedFilename);
 
     if (uploadedFilename) {
       uniqueLocalName = path.basename(String(uploadedFilename));
@@ -6387,8 +6440,8 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       detectedExt === 'm4v' ||
       (mimeType && mimeType.startsWith('video/'));
 
-    let processedDuration = Number(duration) || (isVideo ? 15 : 10);
-    if (isVideo) {
+    let processedDuration = Number(preUploadedMeta?.duration) || Number(duration) || (isVideo ? 15 : 10);
+    if (isVideo && !alreadyProcessedByChunk) {
       try {
         const filePath = path.join(uploadsDir, uniqueLocalName);
         const processed = await processAndOptimizeVideo(filePath, uniqueLocalName);
@@ -6403,14 +6456,13 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       } catch (vidErr) {
         console.warn('[Media Upload] Video optimization fallback:', vidErr);
       }
-    }
-
-    // Re-save optimized binary to Firestore chunk store if video
-    if (isVideo) {
       saveMediaBinaryToFirestore(uniqueLocalName, 'video/mp4', buffer).catch(() => {});
+    } else if (isVideo) {
+      detectedExt = 'mp4';
+      mimeType = 'video/mp4';
     }
 
-    const localUrl = `/uploads/${uniqueLocalName}`;
+    const localUrl = preUploadedMeta?.localUrl || `/uploads/${uniqueLocalName}`;
 
     // Check Drive token (either pre-registered system token, refresh token auto-renewal, service account or client token)
     const token = await getValidDriveServerToken(clientDriveToken);
@@ -6432,7 +6484,32 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
     let driveUploadInfo: any = null;
     let targetFolderId: string | undefined = undefined;
 
-    if (token) {
+    if (alreadyProcessedByChunk && preUploadedMeta?.driveFileId) {
+      // Reuse Google Drive upload already completed during /upload/chunk
+      mediaSavedToDrive = true;
+      driveUploadInfo = {
+        id: preUploadedMeta.driveFileId,
+        webViewLink: preUploadedMeta.driveViewUrl || `https://drive.google.com/file/d/${preUploadedMeta.driveFileId}/view`,
+      };
+      const alreadyDoc = (data.drive_documents || []).some((d) => d.drive_file_id === preUploadedMeta.driveFileId);
+      if (!alreadyDoc) {
+        db.createDriveDocument({
+          unique_code: uniqueCode,
+          company_id: companyId,
+          sub_client_id: companyId,
+          category: isPhoto ? 'photo' : 'document',
+          title: (name || filename || 'Nova Mídia').trim(),
+          description: `Mídia para exibição em TVs (${uniqueCode})`,
+          file_name: filename || uniqueLocalName,
+          file_size: buffer.length,
+          mime_type: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
+          drive_file_id: preUploadedMeta.driveFileId,
+          drive_view_url: driveUploadInfo.webViewLink,
+          local_url: localUrl,
+          status: 'completed',
+        });
+      }
+    } else if (token && (!alreadyProcessedByChunk || isVideo)) {
       try {
         const structure = await serverEnsureClientFolders(
           token,
@@ -6493,25 +6570,31 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       console.log(`[Google Drive Storage] ${isPhoto ? 'Foto' : 'Vídeo'} vinculado ao Google Drive com sucesso:`, driveUploadInfo.id);
     }
 
-    // Se o Cloudflare R2 estiver configurado, salvar a mídia diretamente no R2 com CDN global permanente
-    const r2Config = getEffectiveR2Config();
-    if (r2Config.enabled && isR2Configured(r2Config)) {
-      try {
-        const r2Res = await uploadToR2({
-          buffer,
-          key: uniqueLocalName,
-          contentType: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
-        });
-        targetUrl = r2Res.publicUrl;
-        console.log('[Cloudflare R2] Mídia da empresa salva no R2 com sucesso:', targetUrl);
-      } catch (r2Err: any) {
-        console.warn('[Cloudflare R2] Falha ao enviar mídia da empresa para R2:', r2Err.message);
+    // Se o Cloudflare R2 estiver configurado, reutilizar URL já enviada ou salvar no R2 agora
+    let r2PublicUrl: string | undefined = preUploadedMeta?.r2Url;
+    if (r2PublicUrl && r2PublicUrl.startsWith('http')) {
+      targetUrl = r2PublicUrl;
+    } else {
+      const r2Config = getEffectiveR2Config();
+      if (r2Config.enabled && isR2Configured(r2Config)) {
+        try {
+          const r2Res = await uploadToR2({
+            buffer,
+            key: uniqueLocalName,
+            contentType: mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4'),
+          });
+          r2PublicUrl = r2Res.publicUrl;
+          targetUrl = r2Res.publicUrl;
+          console.log('[Cloudflare R2] Mídia da empresa salva no R2 com sucesso:', targetUrl);
+        } catch (r2Err: any) {
+          console.warn('[Cloudflare R2] Falha ao enviar mídia da empresa para R2:', r2Err.message);
+        }
       }
     }
 
     const now = new Date().toISOString();
     const newMedia: Media = {
-      id: `med-${Date.now()}`,
+      id: `med-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       company_id: companyId,
       name: (name || filename || 'Nova Mídia').trim(),
       type: isVideo ? 'video' : 'image',
@@ -6527,11 +6610,21 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
       file_size: buffer.length,
       mime_type: isVideo ? 'video/mp4' : (mimeType || (isPhoto ? 'image/jpeg' : 'video/mp4')),
       local_url: localUrl,
-      r2_url: targetUrl.startsWith('http') ? targetUrl : undefined,
+      r2_url: r2PublicUrl || (targetUrl.startsWith('http') ? targetUrl : undefined),
       created_at: now,
       updated_at: now,
     };
 
+    unmarkAsDeleted(
+      data,
+      newMedia.id,
+      newMedia.name,
+      newMedia.file_url,
+      newMedia.local_url,
+      newMedia.r2_url,
+      newMedia.drive_file_id,
+      newMedia.unique_code
+    );
     data.media.push(newMedia);
 
     let playlistsUpdatedCount = 0;
@@ -6570,6 +6663,7 @@ apiRouter.post('/company/media/upload-to-drive', requireAuth, requireRole('compa
     }
 
     db.persist();
+    saveDatabaseToFirestoreNow(data).catch(() => {});
 
     // Broadcast to all connected devices (TV players and dashboards) in real-time
     try {

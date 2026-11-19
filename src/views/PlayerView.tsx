@@ -109,22 +109,43 @@ function resolveMediaUrl(url: string | undefined): string {
   return resolveMediaDisplayUrl(url);
 }
 
+function isPrivateR2Url(url?: string | null): boolean {
+  return Boolean(url && typeof url === 'string' && url.includes('.r2.cloudflarestorage.com'));
+}
+
 function resolveVideoPlaybackUrl(item: CurrentPlayerData['items'][0] | null): string {
   if (!item) return '';
+  const mediaId = item.media_id || item.id;
+  const proxyStreamUrl = mediaId ? `${API_BASE_URL}/media/stream/${mediaId}?proxy=1` : '';
   const r2Url = item.r2_url;
   if (r2Url && typeof r2Url === 'string' && r2Url.startsWith('http') && !r2Url.includes('drive.google.com')) {
-    return r2Url;
+    return isPrivateR2Url(r2Url) && proxyStreamUrl ? proxyStreamUrl : r2Url;
   }
   if (item.file_url && item.file_url.startsWith('http') && !item.file_url.includes('drive.google.com')) {
-    return item.file_url;
+    return isPrivateR2Url(item.file_url) && proxyStreamUrl ? proxyStreamUrl : item.file_url;
   }
   if (item.local_url && item.local_url.startsWith('/uploads/')) {
     return item.local_url;
   }
-  if (item.media_id || item.id) {
-    return `${API_BASE_URL}/media/stream/${item.media_id || item.id}`;
+  if (proxyStreamUrl) {
+    return proxyStreamUrl;
   }
   return resolveMediaUrl(item.file_url);
+}
+
+function resolveImagePlaybackUrl(item: CurrentPlayerData['items'][0] | null): string {
+  if (!item) return '';
+  const mediaId = item.media_id || item.id;
+  const proxyStreamUrl = mediaId ? `${API_BASE_URL}/media/stream/${mediaId}?proxy=1` : '';
+  const candidate = item.r2_url || item.file_url;
+  if (isPrivateR2Url(candidate) && proxyStreamUrl) {
+    return proxyStreamUrl;
+  }
+  const resolved = resolveMediaUrl(candidate);
+  if ((!resolved || isPrivateR2Url(resolved)) && proxyStreamUrl) {
+    return proxyStreamUrl;
+  }
+  return resolved;
 }
 
 function buildClientSyncFingerprint(payload: CurrentPlayerData | null): string {
@@ -170,6 +191,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
   const slideStartedAtRef = useRef<number>(Date.now());
   const currentMediaRef = useRef<CurrentPlayerData['items'][0] | null>(null);
   const triedVideoFallbacksRef = useRef<Set<string>>(new Set());
+  const triedImageFallbacksRef = useRef<Set<string>>(new Set());
 
   // Purge any previously cached opaque (status 0) responses in Workbox caches so HTTP Range requests for videos never break
   useEffect(() => {
@@ -336,8 +358,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
       const imageCache = hasCaches ? await caches.open('indoor-media-images-v1').catch(() => null) : null;
 
       for (const item of mediaItems) {
-        const assetUrl = item.r2_url || item.file_url;
-        if (!assetUrl || assetUrl.startsWith('widget:') || assetUrl.startsWith('idb:')) continue;
+        const rawAssetUrl = item.r2_url || item.file_url;
+        if (!rawAssetUrl || rawAssetUrl.startsWith('widget:') || rawAssetUrl.startsWith('idb:')) continue;
+        const assetUrl = isPrivateR2Url(rawAssetUrl) && (item.media_id || item.id)
+          ? `${API_BASE_URL}/media/stream/${item.media_id || item.id}?proxy=1`
+          : rawAssetUrl;
 
         if (assetUrl.startsWith('data:')) {
           count++;
@@ -999,6 +1024,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
       activeSlideKeyRef.current = slideKey;
       slideStartedAtRef.current = Date.now();
       triedVideoFallbacksRef.current.clear();
+      triedImageFallbacksRef.current.clear();
     }
 
     const durationSec = Math.max(1, Number(item.duration) || 10);
@@ -1315,38 +1341,64 @@ export const PlayerView: React.FC<PlayerViewProps> = ({ onExit, overridePlayerCo
             <div className={`w-full h-full ${getTransitionClass()}`}>
               <img
                 key={`${currentMedia?.id}-${currentIndex}-${playCycle}`}
-                src={resolveMediaUrl(currentMedia?.r2_url || currentMedia?.file_url)}
+                src={resolveImagePlaybackUrl(currentMedia)}
                 alt={currentMedia?.name}
                 referrerPolicy="no-referrer"
                 onError={(e) => {
                   const target = e.currentTarget;
-                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
-                  if (driveId && !(target.src || '').includes('thumbnail')) {
-                    target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+                  const tried = triedImageFallbacksRef.current;
+                  const mediaId = currentMedia?.media_id || currentMedia?.id;
+                  const streamUrl = mediaId ? `${API_BASE_URL}/media/stream/${mediaId}?proxy=1` : '';
+
+                  // 1. Try server proxy stream (local disk, private R2 S3, Firestore chunks, Drive)
+                  if (streamUrl && !tried.has('proxy') && !target.src.includes('proxy=1')) {
+                    tried.add('proxy');
+                    target.src = streamUrl;
                     return;
                   }
-                  if (driveId && !(target.src || '').includes('uc?id=')) {
-                    target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
-                    return;
-                  }
-                  if (currentMedia?.local_url && target.src !== currentMedia.local_url) {
+
+                  // 2. Try local /uploads/ fallback
+                  if (currentMedia?.local_url && !tried.has('local') && target.src !== currentMedia.local_url) {
+                    tried.add('local');
                     target.src = currentMedia.local_url;
                     return;
                   }
-                  getIndexedDbMedia(currentMedia).then((rec) => {
-                    if (rec && target.src !== rec) {
-                      target.src = rec;
-                    } else {
-                      console.warn('Erro ao carregar imagem, avançando:', e);
+
+                  // 3. Try Google Drive thumbnail & direct view
+                  const driveId = (currentMedia as any)?.drive_file_id || extractDriveFileId(currentMedia?.file_url);
+                  if (driveId && !tried.has('drive_thumb')) {
+                    tried.add('drive_thumb');
+                    target.src = `https://drive.google.com/thumbnail?id=${driveId}&sz=w1920`;
+                    return;
+                  }
+                  if (driveId && !tried.has('drive_uc')) {
+                    tried.add('drive_uc');
+                    target.src = `https://drive.google.com/uc?id=${driveId}&export=view`;
+                    return;
+                  }
+
+                  // 4. Try IndexedDB / Firestore binary recovery
+                  if (!tried.has('idb')) {
+                    tried.add('idb');
+                    getIndexedDbMedia(currentMedia).then((rec) => {
+                      if (rec && target.src !== rec) {
+                        target.src = rec;
+                      } else {
+                        console.warn('Erro ao carregar imagem, avançando:', e);
+                        setTimeout(() => {
+                          advanceNextMedia();
+                        }, 2500);
+                      }
+                    }).catch(() => {
                       setTimeout(() => {
                         advanceNextMedia();
                       }, 2500);
-                    }
-                  }).catch(() => {
+                    });
+                  } else {
                     setTimeout(() => {
                       advanceNextMedia();
                     }, 2500);
-                  });
+                  }
                 }}
                 className="h-full w-full object-cover"
               />

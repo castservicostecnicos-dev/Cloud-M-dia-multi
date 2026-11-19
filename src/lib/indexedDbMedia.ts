@@ -83,21 +83,30 @@ export function getMediaCandidateKeys(input: any): string[] {
       rawKeys.push(basename.replace(/^idb:/, ''));
     }
   } else if (typeof input === 'object') {
+    let hasStrongIdentifier = false;
+    if (input.id && typeof input.id === 'string') {
+      rawKeys.push(input.id.trim().replace(/^idb:/, ''));
+      hasStrongIdentifier = true;
+    }
     if (input.file_url && typeof input.file_url === 'string') {
       const u = input.file_url.trim();
       const withoutPrefix = u.replace(/^idb:/, '').replace(/^\/uploads\//, '').replace(/^\//, '');
       rawKeys.push(withoutPrefix);
       const basename = u.split('/').pop() || '';
       if (basename) rawKeys.push(basename.replace(/^idb:/, ''));
-    }
-    if (input.id && typeof input.id === 'string') {
-      rawKeys.push(input.id.trim().replace(/^idb:/, ''));
+      hasStrongIdentifier = true;
     }
     if (input.local_url && typeof input.local_url === 'string') {
       const basename = input.local_url.split('/').pop() || '';
       if (basename) rawKeys.push(basename.replace(/^idb:/, ''));
+      hasStrongIdentifier = true;
     }
-    if (input.name && typeof input.name === 'string') {
+    if (input.r2_url && typeof input.r2_url === 'string') {
+      const basename = input.r2_url.split('?')[0].split('/').pop() || '';
+      if (basename) rawKeys.push(basename);
+      hasStrongIdentifier = true;
+    }
+    if (!hasStrongIdentifier && input.name && typeof input.name === 'string') {
       rawKeys.push(input.name.trim());
     }
   }
@@ -117,7 +126,12 @@ export function getMediaCandidateKeys(input: any): string[] {
   return sanitized;
 }
 
-export async function saveIndexedDbMedia(id: string, dataUrl: string, secondaryFilename?: string): Promise<void> {
+export async function saveIndexedDbMedia(
+  id: string,
+  dataUrl: string,
+  secondaryFilename?: string,
+  options?: { skipCloudSync?: boolean }
+): Promise<void> {
   if (!id || !dataUrl) return;
   const cleanId = id.replace(/^idb:/, '');
   const candidateKeys = getMediaCandidateKeys({ id, file_url: secondaryFilename });
@@ -140,10 +154,12 @@ export async function saveIndexedDbMedia(id: string, dataUrl: string, secondaryF
     console.warn('[IndexedDB] Erro ao salvar mídia localmente:', err);
   }
 
-  // Backup to cloud chunks so other devices (e.g. PC logging into same account) can access it
-  saveMediaBinaryToFirestoreCloud(cleanId, dataUrl).catch(() => {});
-  if (secondaryFilename && secondaryFilename !== cleanId) {
-    saveMediaBinaryToFirestoreCloud(secondaryFilename, dataUrl).catch(() => {});
+  if (!options?.skipCloudSync) {
+    // Backup to cloud chunks so other devices (e.g. PC logging into same account) can access it
+    saveMediaBinaryToFirestoreCloud(cleanId, dataUrl).catch(() => {});
+    if (secondaryFilename && secondaryFilename !== cleanId) {
+      saveMediaBinaryToFirestoreCloud(secondaryFilename, dataUrl).catch(() => {});
+    }
   }
 }
 

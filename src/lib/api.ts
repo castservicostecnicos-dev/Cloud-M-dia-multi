@@ -69,15 +69,17 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   let data: any = null;
   let parseFailed = false;
 
+  const isUploadEndpoint = endpoint.includes('/upload');
   const isSlowEndpoint =
-    endpoint.includes('/upload') ||
+    isUploadEndpoint ||
     endpoint.includes('/r2/') ||
     endpoint.includes('/drive/') ||
     endpoint.includes('/sync') ||
     endpoint.includes('/integrity');
-  const timeoutMs = isSlowEndpoint ? 60000 : 15000;
+  const timeoutMs = isUploadEndpoint ? 180000 : isSlowEndpoint ? 90000 : 15000;
   const controller = new AbortController();
   const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs);
+  let networkError: any = null;
 
   try {
     response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -91,6 +93,9 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
     // If server returned HTML (e.g. index.html SPA rewrite because /api route does not exist on Cloudflare Pages)
     if (contentType.includes('text/html')) {
+      if (isUploadEndpoint && !isExplicitStaticHost) {
+        throw new Error('Servidor indisponível no momento para receber uploads.');
+      }
       if (isExplicitStaticHost) isDecoupledStaticMode = true;
       return (await handleClientFallbackRequest(endpoint, options, token)) as T;
     }
@@ -101,18 +106,19 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       parseFailed = true;
       data = {};
     }
-  } catch {
+  } catch (err: any) {
     clearTimeout(timeoutTimer);
+    networkError = err;
     parseFailed = true;
   }
 
-  if (response && !response.ok && !parseFailed) {
+  if (response && !response.ok) {
     if (response.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
       throw new Error(data?.error || 'Sua sessão expirou. Por favor, faça login novamente para continuar.');
     }
     // If 404 on API endpoint, host is static, route to fallback
-    if (response.status === 404) {
+    if (response.status === 404 && !isUploadEndpoint) {
       if (isExplicitStaticHost) isDecoupledStaticMode = true;
       return (await handleClientFallbackRequest(endpoint, options, token)) as T;
     }
@@ -120,7 +126,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   }
 
   if (!response || parseFailed) {
-    if (isExplicitStaticHost) isDecoupledStaticMode = true;
+    if (isUploadEndpoint || !isExplicitStaticHost) {
+      const msg =
+        networkError?.name === 'AbortError'
+          ? 'Tempo limite excedido durante a operação. Tente novamente.'
+          : networkError?.message || 'Erro de comunicação com o servidor.';
+      throw new Error(msg);
+    }
+    isDecoupledStaticMode = true;
     return (await handleClientFallbackRequest(endpoint, options, token)) as T;
   }
 
@@ -782,6 +795,17 @@ export const api = {
       });
 
     let uploadedFilename = '';
+    let preUploadedMeta: {
+      skipDuplicateProcessing: boolean;
+      url?: string;
+      localUrl?: string;
+      r2Url?: string;
+      driveFileId?: string;
+      driveViewUrl?: string;
+      duration?: number;
+      size?: number;
+      filename?: string;
+    } | undefined;
 
     for (let i = 0; i < totalChunks; i++) {
       const start = i * CHUNK_SIZE;
@@ -789,23 +813,60 @@ export const api = {
       const slice = file.slice(start, end);
       const chunkData = await blobToBase64(slice);
 
-      const res = await request<{
+      let res: {
         status: string;
         filename: string;
         url?: string;
-      }>('/upload/chunk', {
-        method: 'POST',
-        body: JSON.stringify({
-          uploadId,
-          chunkIndex: i,
-          totalChunks,
-          chunkData,
-          filename: file.name,
-          mimeType: file.type || 'application/octet-stream',
-        }),
-      });
+        localUrl?: string;
+        r2Url?: string;
+        driveFileId?: string;
+        driveViewUrl?: string;
+        duration?: number;
+        size?: number;
+      } | null = null;
+
+      let lastChunkErr: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          res = await request<typeof res extends null ? never : any>('/upload/chunk', {
+            method: 'POST',
+            body: JSON.stringify({
+              uploadId,
+              chunkIndex: i,
+              totalChunks,
+              chunkData,
+              filename: file.name,
+              mimeType: file.type || 'application/octet-stream',
+            }),
+          });
+          lastChunkErr = null;
+          break;
+        } catch (err: any) {
+          lastChunkErr = err;
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+          }
+        }
+      }
+
+      if (lastChunkErr || !res) {
+        throw lastChunkErr || new Error(`Falha ao enviar parte ${i + 1} de ${totalChunks} do arquivo.`);
+      }
 
       uploadedFilename = res.filename;
+      if (res.status === 'completed') {
+        preUploadedMeta = {
+          skipDuplicateProcessing: true,
+          url: res.url,
+          localUrl: res.localUrl,
+          r2Url: res.r2Url,
+          driveFileId: res.driveFileId,
+          driveViewUrl: res.driveViewUrl,
+          duration: res.duration,
+          size: res.size,
+          filename: res.filename,
+        };
+      }
       if (onProgress) {
         onProgress(Math.min(92, Math.round(((i + 1) / totalChunks) * 90)));
       }
@@ -840,6 +901,7 @@ export const api = {
         companyId,
         clientDriveToken: storedDriveToken,
         addToAllPlaylists,
+        preUploadedMeta,
       }),
     });
 

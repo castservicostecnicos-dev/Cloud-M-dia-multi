@@ -7,6 +7,7 @@ import {
   queueFirestoreSync,
   getFirestoreSyncStatus,
   enableFirestoreSync,
+  flushFirestoreSyncIfPending,
 } from './firestore.js';
 import { R2Settings } from '../src/types';
 
@@ -954,7 +955,10 @@ class DatabaseStore {
     }
   }
 
+  private lastLocalMutationAt = 0;
+
   private save() {
+    this.lastLocalMutationAt = Date.now();
     try {
       fs.writeFileSync(dbPath, JSON.stringify(this.data, null, 2), 'utf-8');
     } catch (err) {
@@ -977,9 +981,13 @@ class DatabaseStore {
       if (!existing) {
         map.set(localItem.id, localItem);
       } else if (localItem.updated_at && existing.updated_at) {
-        if (new Date(localItem.updated_at).getTime() > new Date(existing.updated_at).getTime()) {
+        const localTime = new Date(localItem.updated_at).getTime();
+        const cloudTime = new Date(existing.updated_at).getTime();
+        if (localTime >= cloudTime) {
           map.set(localItem.id, localItem);
         }
+      } else if (localItem.updated_at && !existing.updated_at) {
+        map.set(localItem.id, localItem);
       }
     }
     return Array.from(map.values());
@@ -1145,12 +1153,19 @@ class DatabaseStore {
     return await saveDatabaseToFirestoreNow(this.data);
   }
 
+  public async flushPendingFirestoreSync(): Promise<boolean> {
+    return await flushFirestoreSyncIfPending();
+  }
+
   private syncInProgress = false;
   private lastSyncFromFirestoreTime = 0;
 
   public async syncFromFirestore(force = false): Promise<boolean> {
     const now = Date.now();
     if (this.syncInProgress) return false;
+    if (!force && now - this.lastLocalMutationAt < 5000) {
+      return false;
+    }
     if (!force && now - this.lastSyncFromFirestoreTime < 8000) {
       return false;
     }

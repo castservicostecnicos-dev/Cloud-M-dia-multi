@@ -558,6 +558,38 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
   const [isAddingToPlaylists, setIsAddingToPlaylists] = useState(false);
   const [choosePlaylistsRestart, setChoosePlaylistsRestart] = useState<boolean>(true);
 
+  const lastSavedPlaylistsRef = useRef<
+    Map<string, { playlist: Playlist; updatedAtMs: number; savedAtMs: number }>
+  >(new Map());
+
+  const recordSavedPlaylist = (pl?: Playlist | null) => {
+    if (!pl || !pl.id) return;
+    const updatedAtMs = pl.updated_at ? new Date(pl.updated_at).getTime() : Date.now();
+    lastSavedPlaylistsRef.current.set(pl.id, {
+      playlist: pl,
+      updatedAtMs: Number.isNaN(updatedAtMs) ? Date.now() : updatedAtMs,
+      savedAtMs: Date.now(),
+    });
+  };
+
+  const mergeFetchedPlaylists = (fetched: Playlist[]): Playlist[] => {
+    const now = Date.now();
+    return fetched.map((serverPl) => {
+      const recent = lastSavedPlaylistsRef.current.get(serverPl.id);
+      if (!recent) return serverPl;
+      const serverUpdatedMs = serverPl.updated_at ? new Date(serverPl.updated_at).getTime() : 0;
+      const isStrictlyNewerOnServer = !Number.isNaN(serverUpdatedMs) && serverUpdatedMs > recent.updatedAtMs;
+      if (isStrictlyNewerOnServer) {
+        lastSavedPlaylistsRef.current.delete(serverPl.id);
+        return serverPl;
+      }
+      if (now - recent.savedAtMs < 15000 || (!Number.isNaN(serverUpdatedMs) && serverUpdatedMs < recent.updatedAtMs)) {
+        return recent.playlist;
+      }
+      return serverPl;
+    });
+  };
+
   const dedupeItemsByMediaId = <T extends Record<string, any>>(items: T[]): T[] => {
     const seen = new Set<string>();
     const result: T[] = [];
@@ -613,7 +645,17 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
 
       for (const pl of playlists) {
         const isSelected = selectedPlaylistIdsForMedia.includes(pl.id);
-        const alreadyHas = pl.items && pl.items.some((it) => it.media_id === media.id);
+        const baseItems =
+          playlistModalOpen && editingPlaylist?.id === pl.id
+            ? playlistForm.items.map((fi, idx) => ({
+                ...fi,
+                playlist_id: pl.id,
+                position: idx + 1,
+                duration: Math.max(1, Number(fi.duration) || 10),
+                created_at: (fi as any).created_at || nowStr,
+              }))
+            : pl.items || [];
+        const alreadyHas = baseItems.some((it) => it.media_id === media.id);
 
         if (isSelected) {
           if (!alreadyHas) {
@@ -621,35 +663,37 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               id: `pli-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               playlist_id: pl.id,
               media_id: media.id,
-              position: (pl.items?.length || 0) + 1,
+              position: baseItems.length + 1,
               duration: media.type === 'weather_clock' ? 12 : media.type === 'rss' ? 15 : 10,
               name: media.name,
               type: media.type,
               file_url: media.file_url,
               created_at: nowStr,
             };
-            const updatedItems = dedupeItemsByMediaId([...(pl.items || []), newItem]).map((it, idx) => ({
+            const updatedItems = dedupeItemsByMediaId([...baseItems, newItem]).map((it, idx) => ({
               ...it,
               position: idx + 1,
             }));
-            await api.updateCompanyPlaylist(pl.id, {
+            const savedPl = await api.updateCompanyPlaylist(pl.id, {
               ...pl,
               items: updatedItems,
               restartPlayers: false,
             });
+            recordSavedPlaylist(savedPl);
             affectedCount++;
           }
         } else {
           // Desmarcada: remove da playlist se estiver presente para refletir com precisão a escolha
           if (alreadyHas) {
             const updatedItems = dedupeItemsByMediaId(
-              (pl.items || []).filter((it) => it.media_id !== media.id)
+              baseItems.filter((it) => it.media_id !== media.id)
             ).map((it, idx) => ({ ...it, position: idx + 1 }));
-            await api.updateCompanyPlaylist(pl.id, {
+            const savedPl = await api.updateCompanyPlaylist(pl.id, {
               ...pl,
               items: updatedItems,
               restartPlayers: false,
             });
+            recordSavedPlaylist(savedPl);
             affectedCount++;
           }
         }
@@ -736,8 +780,20 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
+  const revokeDeviceFilePreview = (url?: string) => {
+    if (url && url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {}
+    }
+  };
+
   const handleRemoveDeviceFile = (id: string) => {
-    setSelectedDeviceFiles((prev) => prev.filter((f) => f.id !== id));
+    setSelectedDeviceFiles((prev) => {
+      const target = prev.find((f) => f.id === id);
+      if (target) revokeDeviceFilePreview(target.dataUrl);
+      return prev.filter((f) => f.id !== id);
+    });
   };
 
   const handleUpdateDeviceFile = (id: string, updates: Partial<QueuedDeviceFile>) => {
@@ -754,7 +810,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       duration: 10,
     });
     setMediaSourceType('device');
-    setSelectedDeviceFiles([]);
+    setSelectedDeviceFiles((prev) => {
+      prev.forEach((f) => revokeDeviceFilePreview(f.dataUrl));
+      return [];
+    });
     setIsUploadingMedia(false);
     setUploadProgress(0);
     setUploadProgressStatus('');
@@ -923,12 +982,13 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       setStores(Array.isArray(st) ? st : []);
       setPlayers(playersList);
       setOperators(opsList);
-      setPlaylists(Array.isArray(py) ? py : []);
+      const mergedPlaylists = Array.isArray(py) ? mergeFetchedPlaylists(py) : [];
+      setPlaylists(mergedPlaylists);
       setMediaList(Array.isArray(md) ? md : []);
       setRssList(Array.isArray(rs) ? rs : []);
 
-      if (editingPlaylist && Array.isArray(py)) {
-        const freshEditing = py.find((p) => p.id === editingPlaylist.id);
+      if (editingPlaylist && mergedPlaylists.length > 0) {
+        const freshEditing = mergedPlaylists.find((p) => p.id === editingPlaylist.id);
         if (freshEditing) {
           setEditingPlaylist(freshEditing);
         }
@@ -1078,7 +1138,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               return prev;
             });
           }
-          if (Array.isArray(py)) setPlaylists(py);
+          if (Array.isArray(py)) setPlaylists(mergeFetchedPlaylists(py));
         })
         .catch(() => {});
     }, 4000);
@@ -1553,33 +1613,80 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
     }
   };
 
+  const buildNormalizedPlaylistPayload = (restartPlayers: boolean) => {
+    const dedupedItems = dedupeItemsByMediaId(playlistForm.items);
+    return {
+      ...playlistForm,
+      items: dedupedItems.map((it, idx) => ({
+        ...it,
+        media_id: it.media_id,
+        position: idx + 1,
+        duration: Math.max(1, Number(it.duration) || 10),
+        schedule_enabled: Boolean(it.schedule_enabled),
+        schedule_days: it.schedule_days || [0, 1, 2, 3, 4, 5, 6],
+        schedule_start_time: it.schedule_start_time || undefined,
+        schedule_end_time: it.schedule_end_time || undefined,
+        schedule_start_date: it.schedule_start_date || undefined,
+        schedule_end_date: it.schedule_end_date || undefined,
+        volume: it.volume !== undefined ? Number(it.volume) : 100,
+        is_muted: Boolean(it.is_muted),
+      })),
+      restartPlayers,
+    };
+  };
+
+  const handleRestartFromPlaylistModal = async () => {
+    const loadingKey = editingPlaylist?.id || 'all';
+    try {
+      setIsRestartingPlayer(loadingKey);
+      let targetPlaylistId = editingPlaylist?.id;
+      let targetPlaylistName = playlistForm.name || editingPlaylist?.name;
+
+      if (editingPlaylist) {
+        const payload = buildNormalizedPlaylistPayload(true);
+        const updatedPl = await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
+        if (updatedPl) {
+          recordSavedPlaylist(updatedPl);
+          setEditingPlaylist(updatedPl);
+          setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
+          setPlaylistForm((prev) => ({
+            ...prev,
+            items: (updatedPl.items || prev.items).map((it: any) => ({
+              ...it,
+              duration: Math.max(1, Number(it.duration) || 10),
+            })),
+          }));
+        }
+        broadcastLocalPlaylistUpdate({
+          playlistId: editingPlaylist.id,
+          explicitRestart: true,
+          reason: `Playlist "${targetPlaylistName}" atualizada e reiniciada`,
+        });
+      }
+
+      await handleRestartPlayers({
+        playlistId: targetPlaylistId,
+        playlistName: targetPlaylistName,
+      });
+      await loadData();
+    } catch (err: any) {
+      showToast('error', err.message || 'Falha ao salvar e reiniciar telas.');
+    } finally {
+      setIsRestartingPlayer(null);
+    }
+  };
+
   const handleSavePlaylist = async (e: React.FormEvent, andRestart = false) => {
     e.preventDefault();
     try {
-      const dedupedItems = dedupeItemsByMediaId(playlistForm.items);
-      const payload = {
-        ...playlistForm,
-        items: dedupedItems.map((it, idx) => ({
-          ...it,
-          media_id: it.media_id,
-          position: idx + 1,
-          duration: Math.max(1, Number(it.duration) || 10),
-          schedule_enabled: Boolean(it.schedule_enabled),
-          schedule_days: it.schedule_days || [0, 1, 2, 3, 4, 5, 6],
-          schedule_start_time: it.schedule_start_time || undefined,
-          schedule_end_time: it.schedule_end_time || undefined,
-          schedule_start_date: it.schedule_start_date || undefined,
-          schedule_end_date: it.schedule_end_date || undefined,
-          volume: it.volume !== undefined ? Number(it.volume) : 100,
-          is_muted: Boolean(it.is_muted),
-        })),
-        restartPlayers: andRestart,
-      };
+      const payload = buildNormalizedPlaylistPayload(andRestart);
 
       let targetPlaylistId = editingPlaylist?.id;
       if (editingPlaylist) {
         const updatedPl = await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
         if (updatedPl) {
+          recordSavedPlaylist(updatedPl);
+          setEditingPlaylist(updatedPl);
           setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
         }
         showToast('success', 'Playlist atualizada e sincronizada com as telas.');
@@ -1587,6 +1694,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         const created: any = await api.createCompanyPlaylist(payload as any);
         if (created?.id) {
           targetPlaylistId = created.id;
+          recordSavedPlaylist(created);
           setPlaylists((prev) => [created, ...prev]);
         }
         showToast('success', 'Playlist criada com sucesso.');
@@ -1606,7 +1714,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
 
       setPlaylistModalOpen(false);
-      loadData();
+      await loadData();
     } catch (err: any) {
       showToast('error', err.message);
     }
@@ -1677,6 +1785,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         };
         const updatedPl = await api.updateCompanyPlaylist(editingPlaylist.id, payload as any);
         if (updatedPl) {
+          recordSavedPlaylist(updatedPl);
           setEditingPlaylist(updatedPl);
           setPlaylists((prev) => prev.map((p) => (p.id === editingPlaylist.id ? updatedPl : p)));
         }
@@ -1693,7 +1802,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             ? `Mídia "${media.name}" já estava na playlist "${editingPlaylist.name}". Reprodutores reiniciados!`
             : `Mídia "${media.name}" salva na playlist "${editingPlaylist.name}" e reprodutores reiniciados!`
         );
-        loadData();
+        await loadData();
       } catch (err: any) {
         showToast('error', `Falha ao salvar playlist: ${err.message}`);
       }
@@ -1972,6 +2081,8 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         )
       );
 
+      const failedFiles: Array<{ name: string; reason: string }> = [];
+
       if (mediaSourceType === 'device') {
         if (selectedDeviceFiles.length === 0) {
           showToast('error', 'Por favor, selecione ao menos um arquivo de mídia do seu dispositivo.');
@@ -1987,6 +2098,14 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               localStorage.getItem('google_drive_access_token')
             : undefined) ||
           undefined;
+
+        const readFileDataUrl = (file: File): Promise<string> =>
+          new Promise((resolve, reject) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(fr.result as string);
+            fr.onerror = () => reject(new Error('Falha ao ler arquivo'));
+            fr.readAsDataURL(file);
+          });
 
         for (let i = 0; i < totalFiles; i++) {
           const fileItem = selectedDeviceFiles[i];
@@ -2004,27 +2123,31 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
               clientDriveToken: currentToken,
               onProgress: (pct) => {
                 const stepBase = (i / totalFiles) * 100;
-                const stepFraction = (pct / totalFiles);
+                const stepFraction = pct / totalFiles;
                 setUploadProgress(Math.min(98, Math.round(stepBase + stepFraction)));
               },
             });
 
             if (uploadRes?.media) {
               createdMedias.push(uploadRes.media);
-              if (fileItem.file) {
-                const fr = new FileReader();
-                fr.onload = () => {
-                  const dUrl = fr.result as string;
+              // Cache locally in browser IndexedDB for <= 10 MB files without duplicating server Firestore writes
+              if (fileItem.file && fileItem.file.size <= 10 * 1024 * 1024) {
+                try {
+                  const dUrl = await readFileDataUrl(fileItem.file);
                   if (dUrl && uploadRes.media?.id) {
-                    saveIndexedDbMedia(uploadRes.media.id, dUrl, uploadRes.media.local_url).catch(() => {});
+                    await saveIndexedDbMedia(uploadRes.media.id, dUrl, uploadRes.media.local_url, {
+                      skipCloudSync: true,
+                    });
                   }
-                };
-                fr.readAsDataURL(fileItem.file);
+                } catch {}
               }
+            } else {
+              failedFiles.push({ name: fileTitle, reason: 'Resposta inválida do servidor.' });
             }
           } catch (fileErr: any) {
             console.error('Falha ao enviar arquivo:', fileItem.name, fileErr);
-            showToast('error', `Falha ao enviar "${fileItem.name}": ${fileErr.message || 'Erro de rede'}`);
+            const reason = fileErr?.message || 'Erro de rede ou timeout';
+            failedFiles.push({ name: fileTitle, reason });
           }
         }
 
@@ -2075,10 +2198,36 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       }
 
       if (createdMedias.length === 0) {
-        showToast('error', 'Nenhuma mídia pôde ser salva.');
+        const errMsg =
+          failedFiles.length > 0
+            ? `Não foi possível enviar ${failedFiles.length} arquivo(s): ${failedFiles[0].name} (${failedFiles[0].reason})`
+            : 'Nenhuma mídia pôde ser salva.';
+        showToast('error', errMsg);
         setIsUploadingMedia(false);
         return;
       }
+
+      // Clean client fallback tombstones if the user re-uploaded a previously deleted filename
+      try {
+        const cacheKey = 'indoor_media_cloudflare_cache';
+        const raw = localStorage.getItem(cacheKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.deleted_media_ids) && parsed.deleted_media_ids.length > 0) {
+            const restoredSet = new Set<string>();
+            for (const cm of createdMedias) {
+              if (cm.id) restoredSet.add(String(cm.id).toLowerCase());
+              if (cm.name) restoredSet.add(String(cm.name).trim().toLowerCase());
+              if (cm.file_url) restoredSet.add(String(cm.file_url).trim().toLowerCase());
+              if ((cm as any).local_url) restoredSet.add(String((cm as any).local_url).trim().toLowerCase());
+            }
+            parsed.deleted_media_ids = parsed.deleted_media_ids.filter(
+              (d: any) => !restoredSet.has(String(d || '').trim().toLowerCase())
+            );
+            localStorage.setItem(cacheKey, JSON.stringify(parsed));
+          }
+        }
+      } catch {}
 
       // Atualiza a biblioteca de mídias imediatamente
       setMediaList((prev) => [
@@ -2092,7 +2241,18 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
         const pl = playlists.find((p) => p.id === targetId);
         if (!pl) continue;
 
-        let currentPlItems = dedupeItemsByMediaId([...(pl.items || [])]);
+        const basePlItems =
+          playlistModalOpen && editingPlaylist?.id === pl.id
+            ? playlistForm.items.map((fi, idx) => ({
+                ...fi,
+                playlist_id: pl.id,
+                position: idx + 1,
+                duration: Math.max(1, Number(fi.duration) || 10),
+                created_at: (fi as any).created_at || nowStr,
+              }))
+            : pl.items || [];
+
+        let currentPlItems = dedupeItemsByMediaId([...basePlItems]);
         for (const created of createdMedias) {
           if (currentPlItems.some((it) => it.media_id === created.id)) {
             continue;
@@ -2143,6 +2303,7 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
             restartPlayers: andRestart,
           });
           if (savedPl) {
+            recordSavedPlaylist(savedPl);
             setPlaylists((prev) => prev.map((p) => (p.id === pl.id ? savedPl : p)));
           }
         } catch (plErr) {
@@ -2165,12 +2326,19 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
       const plMsg = uniqueTargetPlIds.length > 0
         ? ` e vinculada(s) a ${uniqueTargetPlIds.length} playlist(s)`
         : '';
-      showToast(
-        'success',
-        createdMedias.length === 1
-          ? `Mídia "${createdMedias[0].name}" enviada e salva na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
-          : `${createdMedias.length} mídias enviadas e salvas na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
-      );
+      if (failedFiles.length > 0) {
+        showToast(
+          'error',
+          `${createdMedias.length} mídia(s) salva(s)${plMsg}, mas ${failedFiles.length} falhou/falharam: ${failedFiles.map((f) => `${f.name} (${f.reason})`).join('; ')}`
+        );
+      } else {
+        showToast(
+          'success',
+          createdMedias.length === 1
+            ? `Mídia "${createdMedias[0].name}" enviada e salva na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
+            : `${createdMedias.length} mídias enviadas e salvas na nuvem com sucesso${plMsg}!${andRestart ? ' Telas reiniciadas.' : ''}`
+        );
+      }
 
       setMediaModalOpen(false);
       resetMediaModalState(playlistModalOpen && editingPlaylist ? editingPlaylist.id : undefined);
@@ -5417,19 +5585,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => {
-                          if (editingPlaylist) {
-                            handleRestartPlayers({
-                              playlistId: editingPlaylist.id,
-                              playlistName: editingPlaylist.name,
-                            });
-                          } else {
-                            handleRestartPlayers({});
-                          }
-                        }}
+                        onClick={handleRestartFromPlaylistModal}
                         disabled={isRestartingPlayer !== null}
                         className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 hover:text-white border border-indigo-500/50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-                        title="Reinicia o player e recarrega a playlist nas telas imediatamente"
+                        title="Salva alterações e reinicia o player para recarregar a playlist nas telas imediatamente"
                       >
                         <RefreshCw className={`h-3.5 w-3.5 ${isRestartingPlayer ? 'animate-spin text-indigo-400' : ''}`} />
                         <span>Reiniciar Player(s)</span>
@@ -5788,15 +5947,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 {editingPlaylist && (
                   <button
                     type="button"
-                    onClick={() =>
-                      handleRestartPlayers({
-                        playlistId: editingPlaylist.id,
-                        playlistName: editingPlaylist.name,
-                      })
-                    }
+                    onClick={handleRestartFromPlaylistModal}
                     disabled={isRestartingPlayer === editingPlaylist.id}
                     className="min-h-[40px] px-3.5 py-2 rounded-lg border border-indigo-500/40 bg-indigo-600/20 hover:bg-indigo-600/35 text-xs font-bold text-indigo-200 hover:text-white flex items-center gap-1.5 transition cursor-pointer"
-                    title="Envia o comando para todas as telas recarregarem esta playlist imediatamente"
+                    title="Salva alterações e envia o comando para todas as telas recarregarem esta playlist imediatamente"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isRestartingPlayer === editingPlaylist.id ? 'animate-spin text-indigo-400' : ''}`} />
                     <span>Reiniciar Telas Agora</span>
@@ -5852,7 +6006,9 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    if (editingPlaylist) {
+                    if (playlistModalOpen && editingPlaylist) {
+                      handleRestartFromPlaylistModal();
+                    } else if (editingPlaylist) {
                       handleRestartPlayers({
                         playlistId: editingPlaylist.id,
                         playlistName: editingPlaylist.name,
@@ -6256,7 +6412,10 @@ export const CompanyDashboard: React.FC<CompanyDashboardProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedDeviceFiles([]);
+                              setSelectedDeviceFiles((prev) => {
+                                prev.forEach((f) => revokeDeviceFilePreview(f.dataUrl));
+                                return [];
+                              });
                               if (fileInputRef.current) fileInputRef.current.value = '';
                             }}
                             className="text-[11px] text-slate-400 hover:text-rose-400 px-2 py-1 transition cursor-pointer"
